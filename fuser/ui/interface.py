@@ -134,6 +134,7 @@ def _apply_expression_mode(mode: str):
     """Al elegir un Modo, rellena los controles con los valores recomendados."""
     preset = config.EXPRESSION_PRESETS.get(mode, config.EXPRESSION_PRESETS[config.EXPR_STANDARD])
     return (
+        preset.get("engine", config.ENGINE_INSIGHTFACE),
         preset["enhancer_model"],
         preset["enhancer_blend"],
         preset.get("codeformer_fidelity", 0.7),
@@ -379,7 +380,7 @@ def build_interface() -> gr.Blocks:
             _apply_expression_mode,
             inputs=expression_mode,
             outputs=[
-                enhancer_model, enhancer_blend, codeformer_fidelity, mask_mode,
+                engine, enhancer_model, enhancer_blend, codeformer_fidelity, mask_mode,
                 eye_preservation, mouth_detail, color_match, temporal_alpha,
                 motion_adaptive, two_pass_temporal, reference_count,
             ],

@@ -242,7 +242,11 @@ class SwapPipeline:
     def _run_two_pass(self, video_path, info, writer, progress) -> int:
         chunk = self.mm.two_pass_chunk((info.height, info.width))
         total = max(1, info.frame_count)
-        log.info("2 pasadas · tramo de %d frames en RAM", chunk)
+        # Modo musical/alta expresión: ventana de estabilización más amplia
+        # (el suavizado adaptativo mantiene la boca rápida sin "lag").
+        music = self.settings.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        time_sigma = 3.0 if music else 2.0
+        log.info("2 pasadas · tramo de %d frames en RAM · time_sigma=%.1f", chunk, time_sigma)
         processed = 0
         start = time.time()
         proc_res = self.settings.processing_resolution
@@ -250,7 +254,7 @@ class SwapPipeline:
         def flush(frames, faces_per_frame):
             nonlocal processed
             apply_two_pass_smoothing(
-                faces_per_frame, time_sigma=2.0, motion_adaptive=self.settings.motion_adaptive
+                faces_per_frame, time_sigma=time_sigma, motion_adaptive=self.settings.motion_adaptive
             )
             for fr, faces in zip(frames, faces_per_frame):
                 targets = self.engine.select_targets(faces)

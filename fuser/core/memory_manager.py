@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import List
 
-from ..config import Settings
+from ..config import ENGINE_FACEFUSION, Settings
 from ..utils.logging import get_logger
 from ..utils.system import get_system_info
 
@@ -107,13 +107,17 @@ class MemoryManager:
     def det_size(self) -> int:
         return int(self.settings.det_size)
 
-    def buffer_sizes(self, frame_shape) -> tuple:
-        """Tamaño de las colas de RAM (prefetch, escritura).
+    @property
+    def is_facefusion(self) -> bool:
+        return self.settings.engine == ENGINE_FACEFUSION
 
-        Con ``ram_boost`` se dimensionan según la **RAM libre real**: se reserva
-        ~30% de la RAM disponible para los buffers de frames (repartida entre las
-        dos colas). Así, en una máquina con 40 GB, la GPU casi nunca espera por el
-        disco. Nunca baja del valor del preset y tiene un tope de seguridad.
+    def buffer_sizes(self, frame_shape) -> tuple:
+        """Tamaño de las colas de RAM (prefetch, escritura) — **adaptativo al motor**.
+
+        Con ``ram_boost`` se dimensionan según la **RAM libre real**. Con FaceFusion
+        (más lento y pesado) se reserva MÁS RAM (~45% vs ~30%) y colas más grandes,
+        para que el decodificado vaya muy por delante y la GPU nunca espere. En
+        una máquina con 40 GB esto mantiene saturado el cómputo de FaceFusion.
         """
         base_pf, base_wq = self.prefetch_frames, self.writer_queue
         if not self.settings.ram_boost or not self.info.ram_available_gb:
@@ -122,25 +126,30 @@ class MemoryManager:
         frame_mb = (h * w * 3) / (1024 ** 2)
         if frame_mb <= 0:
             return base_pf, base_wq
-        budget_mb = self.info.ram_available_gb * 1024 * 0.30
+        fraction = 0.45 if self.is_facefusion else 0.30
+        cap = 1400 if self.is_facefusion else 800
+        budget_mb = self.info.ram_available_gb * 1024 * fraction
         n = int(budget_mb / frame_mb / 2)
-        n = max(base_pf, min(n, 800))
+        n = max(base_pf, min(n, cap))
         return n, n
 
     def two_pass_chunk(self, frame_shape) -> int:
-        """Nº de frames que cabe procesar por tramo en modo 2 pasadas (acota RAM).
+        """Nº de frames por tramo en 2 pasadas (acota RAM) — **adaptativo al motor**.
 
-        El modo de 2 pasadas guarda un tramo de frames en RAM para suavizar los
-        landmarks con ventana centrada. El tamaño del tramo se ajusta a la RAM
-        libre (~45%), con límites prudentes.
+        Guarda un tramo de frames en RAM para suavizar landmarks con ventana
+        centrada (no causal). Con FaceFusion se usan tramos más grandes (~55% de
+        la RAM libre) → ventanas de estabilización más amplias y mejor
+        consistencia temporal de la boca/ojos.
         """
         if not self.info.ram_available_gb:
             return 300
         h, w = frame_shape[:2]
         frame_mb = max((h * w * 3) / (1024 ** 2), 0.1)
-        budget_mb = self.info.ram_available_gb * 1024 * 0.45
+        fraction = 0.55 if self.is_facefusion else 0.45
+        cap = 6000 if self.is_facefusion else 4000
+        budget_mb = self.info.ram_available_gb * 1024 * fraction
         n = int(budget_mb / frame_mb)
-        return max(60, min(n, 4000))
+        return max(60, min(n, cap))
 
     def summary(self) -> str:
         dev = "GPU (CUDA)" if self.use_gpu else "CPU"

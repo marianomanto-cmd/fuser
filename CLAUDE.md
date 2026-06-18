@@ -40,6 +40,12 @@ python -c "import onnxruntime as ort; print(ort.get_available_providers())"  # d
 Si no aparece CUDA: revisar driver NVIDIA y **emparejar `onnxruntime-gpu` con la versión de CUDA**
 (ver `INSTALL.md` §3). **Nunca** tener `onnxruntime` y `onnxruntime-gpu` instalados a la vez.
 
+## Kit offline (pendrive)
+Si el usuario trae modelos/FaceFusion en un pendrive, **pídele la ruta de la carpeta `modelos`** y
+coloca: `fuser_models/*.onnx → models/`, `insightface/buffalo_l → models/models/buffalo_l/`,
+`facefusion → vendor/facefusion/`. Detalle en `INSTALL.md` → "Instalar desde un pendrive". La ruta del
+pendrive **la tiene que indicar el usuario** (cambia por máquina).
+
 ## Arquitectura (resumen)
 ```
 app.py                      # entrypoint Gradio (también HF Spaces); expone `demo`

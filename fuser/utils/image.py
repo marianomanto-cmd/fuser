@@ -153,6 +153,72 @@ def eye_mouth_region_masks(
     return np.clip(eyes, 0, 1), np.clip(mouth, 0, 1)
 
 
+def frame_eye_mouth_masks(
+    kps: np.ndarray, frame_shape, mouth_open_boost: float = 1.0
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Máscaras de ojos/boca en coordenadas del **frame completo** (kps en frame).
+
+    Se usa para el post-procesado por regiones aplicado sobre la salida ya
+    compuesta (p. ej. la de FaceFusion): realzar ojos y dientes sin tocar el
+    resto. El plumeado es relativo a la cara (distancia interocular), no al frame.
+    """
+    h, w = frame_shape[:2]
+    eyes = np.zeros((h, w), dtype=np.float32)
+    mouth = np.zeros((h, w), dtype=np.float32)
+    kps = np.asarray(kps, dtype=np.float32).reshape(-1, 2)
+    if len(kps) < 5:
+        return eyes, mouth
+
+    eye_l, eye_r, nose, mouth_l, mouth_r = kps[0], kps[1], kps[2], kps[3], kps[4]
+    inter = float(np.linalg.norm(eye_r - eye_l)) + 1e-3
+    angle = float(np.degrees(np.arctan2(eye_r[1] - eye_l[1], eye_r[0] - eye_l[0])))
+
+    eye_ax, eye_ay = int(inter * 0.42), int(inter * 0.26)
+    for c in (eye_l, eye_r):
+        cv2.ellipse(eyes, (int(c[0]), int(c[1])), (max(2, eye_ax), max(2, eye_ay)),
+                    angle, 0, 360, 1.0, -1)
+
+    mouth_c = (mouth_l + mouth_r) / 2.0
+    mouth_w = float(np.linalg.norm(mouth_r - mouth_l)) + 1e-3
+    m_ax = int(mouth_w * 0.75)
+    m_ay = int(mouth_w * 0.55 * (1.0 + 0.8 * float(np.clip(mouth_open_boost, 0, 2))))
+    down = mouth_c - (eye_l + eye_r) / 2.0
+    down = down / (np.linalg.norm(down) + 1e-3)
+    m_center = mouth_c + down * (m_ay * 0.25)
+    cv2.ellipse(mouth, (int(m_center[0]), int(m_center[1])), (max(3, m_ax), max(3, m_ay)),
+                angle, 0, 360, 1.0, -1)
+
+    ke = _odd(max(3, inter * 0.30))
+    km = _odd(max(3, mouth_w * 0.35))
+    eyes = cv2.GaussianBlur(eyes, (ke, ke), 0)
+    mouth = cv2.GaussianBlur(mouth, (km, km), 0)
+    return np.clip(eyes, 0, 1), np.clip(mouth, 0, 1)
+
+
+def enhance_regions(
+    frame: np.ndarray,
+    kps_list,
+    eye_strength: float = 0.0,
+    mouth_strength: float = 0.0,
+    mouth_open_boost: float = 1.0,
+) -> np.ndarray:
+    """Realza ojos y boca/dientes en el frame para una o varias caras.
+
+    Post-procesado independiente del motor: se aplica sobre el frame ya compuesto
+    (ideal para reforzar la salida de FaceFusion en boca/dientes/ojos).
+    """
+    out = frame
+    for kps in kps_list:
+        eyes, mouth = frame_eye_mouth_masks(kps, out.shape, mouth_open_boost)
+        inter = float(np.linalg.norm(np.asarray(kps[1]) - np.asarray(kps[0]))) + 1e-3
+        radius = max(3.0, inter * 0.06)  # detalle fino, no desenfoque grande
+        if eye_strength > 0 and eyes.max() > 0:
+            out = apply_local_detail(out, eyes, amount=eye_strength * 1.2, radius=radius)
+        if mouth_strength > 0 and mouth.max() > 0:
+            out = apply_local_detail(out, mouth, amount=mouth_strength * 1.4, radius=radius)
+    return out
+
+
 def unsharp(image: np.ndarray, amount: float = 0.6, radius: float = 0.0) -> np.ndarray:
     """Realce de nitidez por unsharp masking."""
     if amount <= 0:
@@ -166,12 +232,12 @@ def unsharp(image: np.ndarray, amount: float = 0.6, radius: float = 0.0) -> np.n
 
 
 def apply_local_detail(
-    face: np.ndarray, region_mask: np.ndarray, amount: float
+    face: np.ndarray, region_mask: np.ndarray, amount: float, radius: float = 0.0
 ) -> np.ndarray:
     """Aplica realce de detalle solo donde ``region_mask`` > 0, ponderado por su valor."""
     if amount <= 0 or region_mask.max() <= 0:
         return face
-    detailed = unsharp(face, amount=amount)
+    detailed = unsharp(face, amount=amount, radius=radius)
     w = np.clip(region_mask, 0, 1)[:, :, None]
     out = detailed.astype(np.float32) * w + face.astype(np.float32) * (1.0 - w)
     return np.clip(out, 0, 255).astype(np.uint8)

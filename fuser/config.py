@@ -282,35 +282,44 @@ EXPRESSION_MODE_LABELS: Dict[str, str] = {
 # Valores recomendados que la UI aplica al elegir un modo de expresión.
 # Pensados para el caso de uso musical: ojos vivos, dientes nítidos al cantar,
 # buen comportamiento en perfiles y mucho movimiento de cabeza.
+# Nota: "facefusion"/"insightface" son los valores de ENGINE_* (definidos más
+# abajo); se usan como literales aquí porque este dict se evalúa antes.
 EXPRESSION_PRESETS: Dict[str, dict] = {
     EXPR_STANDARD: dict(
+        engine="insightface",
         enhancer_model="gfpgan_1.4", enhancer_blend=0.8,
         mask_mode=MASK_HULL, eye_preservation=0.35, mouth_detail=0.35,
         color_match=False, temporal_smoothing=True, temporal_alpha=0.55,
         motion_adaptive=True, two_pass_temporal=False, reference_count=1,
     ),
     EXPR_MUSIC_VIDEO: dict(
-        # CodeFormer preserva mejor dientes y textura de piel.
-        enhancer_model="codeformer", enhancer_blend=0.85, codeformer_fidelity=0.75,
-        mask_mode=MASK_HULL, eye_preservation=0.7, mouth_detail=0.75,
+        # Modo musical inteligente: recomienda FaceFusion (alta calidad), muchas
+        # referencias, post-procesado agresivo de boca/dientes y 2 pasadas (RAM).
+        engine="facefusion",
+        enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.75,
+        mask_mode=MASK_HULL,
+        eye_preservation=0.8,        # ojos vivos
+        mouth_detail=0.9,            # dientes nítidos al cantar
         color_match=True,            # iluminación cambiante de los escenarios
         temporal_smoothing=True, temporal_alpha=0.45,
         motion_adaptive=True,        # nada de "lag" en la boca al cantar
         two_pass_temporal=True,      # estabilidad sin lag (usa RAM)
-        reference_count=5,           # varios ángulos/expresiones
+        reference_count=6,           # 4-6 ángulos/expresiones
     ),
     EXPR_HIGH_EXPRESSION: dict(
-        enhancer_model="codeformer", enhancer_blend=0.85, codeformer_fidelity=0.8,
-        mask_mode=MASK_HULL, eye_preservation=0.8, mouth_detail=0.85,
+        engine="facefusion",
+        enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.8,
+        mask_mode=MASK_HULL, eye_preservation=0.85, mouth_detail=0.95,
         color_match=True, temporal_smoothing=True, temporal_alpha=0.4,
-        motion_adaptive=True, two_pass_temporal=True, reference_count=5,
+        motion_adaptive=True, two_pass_temporal=True, reference_count=6,
     ),
 }
 
 # Opciones para el selector de cantidad de referencias.
 REFERENCE_COUNT_CHOICES = [
     ("Auto (todas las que subas)", 0), ("1 imagen", 1),
-    ("3 imágenes", 3), ("5 imágenes", 5), ("8 imágenes", 8),
+    ("3 imágenes", 3), ("4 imágenes", 4), ("5 imágenes", 5),
+    ("6 imágenes", 6), ("8 imágenes", 8),
 ]
 
 

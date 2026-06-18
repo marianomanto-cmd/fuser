@@ -60,7 +60,52 @@ class FaceFusionSwapper(BaseFaceSwapper):
         super().__init__(settings, memory_manager)
         self._modules = {}
         self._source_face = None
+        self._analyser = None  # detector InsightFace para el post-procesado por regiones
         self._loaded = False
+
+    # ----- post-procesado por regiones (calidad de boca/dientes/ojos) ---------
+    def _mouth_open_boost(self) -> float:
+        m = self.settings.expression_mode
+        if m == config.EXPR_HIGH_EXPRESSION:
+            return 2.0
+        if m == config.EXPR_MUSIC_VIDEO:
+            return 1.5
+        return 1.0
+
+    def _ensure_analyser(self):
+        if self._analyser is not None:
+            return self._analyser
+        from ..models.face_analyser import FaceAnalyser
+
+        self._analyser = FaceAnalyser(self.mm.analyser_providers(), self.mm.ctx_id(), self.mm.det_size)
+        self._analyser.load()
+        return self._analyser
+
+    def _detect(self, frame: np.ndarray):
+        try:
+            return self._ensure_analyser().get_faces(frame)
+        except Exception as exc:  # pragma: no cover
+            log.warning("Detección para post-procesado falló: %s", exc)
+            return []
+
+    def _postprocess(self, frame: np.ndarray, faces) -> np.ndarray:
+        """Refuerza boca/dientes y ojos sobre la salida de FaceFusion.
+
+        Es lo que convierte la calidad de FaceFusion en "claramente superior" en
+        los casos difíciles: dientes nítidos al cantar y ojos vivos, sin tocar el
+        resto de la cara. Más agresivo en modo Videos Musicales.
+        """
+        from ..utils import image as imageutil
+
+        s = self.settings
+        if (s.eye_preservation <= 0 and s.mouth_detail <= 0) or not faces:
+            return frame
+        kps_list = [f.kps for f in faces]
+        return imageutil.enhance_regions(
+            frame, kps_list,
+            eye_strength=s.eye_preservation, mouth_strength=s.mouth_detail,
+            mouth_open_boost=self._mouth_open_boost(),
+        )
 
     # ----- importación perezosa de FaceFusion ---------------------------------
     def _import(self):
@@ -126,6 +171,8 @@ class FaceFusionSwapper(BaseFaceSwapper):
         self._set("face_detector_model", "yoloface")
         self._set("face_detector_size", f"{self.mm.det_size}x{self.mm.det_size}")
         self._set("face_detector_angles", [0])
+        # Umbral más permisivo: detecta mejor perfiles laterales.
+        self._set("face_detector_score", 0.5 if music else 0.6)
 
         # Selección de caras objetivo.
         selector = {
@@ -229,12 +276,8 @@ class FaceFusionSwapper(BaseFaceSwapper):
             # Variante posicional (target_vision_frame,)
             return fn(inputs.get("target_vision_frame"))
 
-    def process_frame(self, frame: np.ndarray, use_smoothing: bool = True) -> np.ndarray:
-        if not self._loaded:
-            self.load()
-        if self._source_face is None:
-            raise RuntimeError("Falta la cara fuente (FaceFusion). Sube imágenes fuente primero.")
-
+    def _ff_swap(self, frame: np.ndarray) -> np.ndarray:
+        """Swap + enhancer nativos de FaceFusion sobre un frame completo."""
         inputs = {
             "reference_faces": None,
             "source_face": self._source_face,
@@ -242,21 +285,48 @@ class FaceFusionSwapper(BaseFaceSwapper):
         }
         out = self._run_module(self._modules["swapper"], inputs)
         out = out if out is not None else frame
-
         enhancer = self._modules.get("enhancer")
         if enhancer is not None and self.settings.enhancer_model != "none":
-            enh_inputs = {"reference_faces": None, "target_vision_frame": out}
-            enh = self._run_module(enhancer, enh_inputs)
+            enh = self._run_module(enhancer, {"reference_faces": None, "target_vision_frame": out})
             if enh is not None:
                 out = enh
         return out
 
-    # FaceFusion gestiona su propia consistencia/máscaras; no exponemos las 2
-    # pasadas de Fuser (se quedaría en 1 pasada con buffering de RAM).
+    def process_frame(self, frame: np.ndarray, use_smoothing: bool = True) -> np.ndarray:
+        if not self._loaded:
+            self.load()
+        if self._source_face is None:
+            raise RuntimeError("Falta la cara fuente (FaceFusion). Sube imágenes fuente primero.")
+        out = self._ff_swap(frame)
+        # Post-procesado: detectar sobre la salida para alinear el realce de regiones.
+        faces = self._detect(out)
+        return self._postprocess(out, faces)
+
+    # ----- 2 pasadas: FF swap + post-procesado de regiones ESTABILIZADO --------
+    # Pasada 1: detectamos (barato) y suavizamos los landmarks usando RAM.
+    # Pasada 2: FaceFusion swapea y aplicamos el realce de boca/ojos con kps
+    # suavizados -> dientes/ojos nítidos y SIN parpadeo entre frames.
     def supports_two_pass(self) -> bool:
-        return False
+        return True
+
+    def detect(self, frame: np.ndarray):
+        return self._detect(frame)
+
+    def select_targets(self, faces):
+        return faces
+
+    def render(self, frame: np.ndarray, targets):
+        if not self._loaded:
+            self.load()
+        if self._source_face is None:
+            raise RuntimeError("Falta la cara fuente (FaceFusion). Sube imágenes fuente primero.")
+        out = self._ff_swap(frame)
+        return self._postprocess(out, targets)
 
     def unload(self) -> None:
         self._modules = {}
         self._source_face = None
+        if self._analyser is not None and hasattr(self._analyser, "unload"):
+            self._analyser.unload()
+        self._analyser = None
         self._loaded = False
