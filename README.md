@@ -115,7 +115,9 @@ descargue partes a RAM cuando la VRAM esté al límite. Las **2 pasadas** (suavi
 RAM) están disponibles con **InsightFace**; con FaceFusion se aprovecha su propia consistencia + los
 buffers de RAM de Fuser.
 
-**Instalar FaceFusion (opcional):** ver [`requirements-facefusion.txt`](requirements-facefusion.txt).
+**Instalar FaceFusion (opcional):** `bash scripts/install_facefusion.sh` (Windows:
+`scripts\install_facefusion.bat`) — clona FaceFusion en `vendor/facefusion` (auto-detectado) e instala
+sus dependencias. Detalles en [`INSTALL.md`](INSTALL.md#-motor-opcional-facefusion-alta-calidad).
 
 ---
 
@@ -349,9 +351,10 @@ fuser/
 ├── .gitignore
 ├── LICENSE
 ├── scripts/
-│   ├── setup.sh / setup.bat   # Instalación automática (Linux/macOS · Windows)
-│   ├── check_env.py           # Doctor de entorno (GPU/RAM/modelos)
-│   └── download_models.py     # Pre-descarga de modelos
+│   ├── setup.sh / setup.bat               # Instalación automática (Linux/macOS · Windows)
+│   ├── install_facefusion.sh / .bat       # Instala el motor opcional FaceFusion
+│   ├── check_env.py                        # Doctor de entorno (GPU/RAM/modelos/motores)
+│   └── download_models.py                  # Pre-descarga de modelos
 ├── models/                    # Modelos ONNX (auto-descarga; ignorado por git)
 └── fuser/
     ├── config.py              # Settings, presets de memoria, registro de modelos, motores

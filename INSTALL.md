@@ -138,6 +138,47 @@ python app.py --port 7861
 
 ---
 
+## ➕ Motor opcional: FaceFusion (Alta Calidad)
+
+El motor **FaceFusion** mejora **boca abierta, dientes y perfiles**, a cambio de **más VRAM y tiempo**.
+Es **opcional**: sin él, Fuser funciona perfectamente con InsightFace.
+
+### Instalación automática (recomendada)
+```bash
+# con el .venv de Fuser ACTIVO:
+bash scripts/install_facefusion.sh      # Windows: scripts\install_facefusion.bat
+```
+Clona FaceFusion en `vendor/facefusion` (Fuser lo **auto-detecta** ahí), instala sus dependencias en
+el mismo entorno y **restaura los pines de Fuser** (gradio 5, numpy<2).
+
+### Instalación manual
+```bash
+git clone https://github.com/facefusion/facefusion vendor/facefusion
+pip install -r vendor/facefusion/requirements.txt
+# Si FaceFusion trae su propio instalador y lo anterior no basta:
+#   cd vendor/facefusion && python install.py --onnxruntime cuda
+# Restaura los pines de Fuser por si algo cambió:
+pip install -U "gradio>=5,<6" "numpy<2"
+```
+(Alternativa: instala FaceFusion donde quieras y exporta `PYTHONPATH` a su carpeta.)
+
+### Verificar
+```bash
+python scripts/check_env.py        # debe mostrar: FaceFusion (Alta Calidad) — disponible
+python -c "from fuser.engines.facefusion_engine import is_available; print(is_available())"   # True
+```
+
+### Notas importantes
+- **VRAM (8 GB):** empieza con *pixel boost* **256x256**; si te quedas sin VRAM, baja a **128x128** o
+  usa un modo de memoria más estricto (Fuser lo mapea a `video_memory_strategy` de FaceFusion).
+- **Conflictos de dependencias:** FaceFusion instala muchas libs; si cambia la versión de gradio/numpy
+  y la UI de Fuser deja de arrancar, reejecuta `pip install -U "gradio>=5,<6" "numpy<2"`.
+- **Versión:** el adaptador apunta a **FaceFusion 3.x**. Si tu versión difiere y el motor falla al
+  cargar, verás un error claro: usa InsightFace mientras tanto.
+- Fuser solo usa los **módulos internos** de FaceFusion (swapper/enhancer/analizador), no su UI.
+
+---
+
 ## 7) Problemas frecuentes
 
 | Síntoma | Solución |
@@ -161,6 +202,9 @@ En la PC con la GPU, clona el repo, abre **Claude Code** dentro de la carpeta `f
 > 3) asegúrate de que `onnxruntime-gpu` coincide con mi CUDA (ejecuta `nvidia-smi` y, si hace falta,
 > reinstala con el índice de CUDA 11.8); 4) corre `python scripts/check_env.py` y arrégla lo que falte
 > hasta que aparezca `CUDAExecutionProvider`; 5) descarga los modelos con `python scripts/download_models.py`;
-> 6) lanza `python app.py` y dime la URL. No subas nada a git ni hagas commits.
+> 6) lanza `python app.py` y dime la URL.
+> Opcional (máxima calidad): instala el motor FaceFusion con `bash scripts/install_facefusion.sh` y
+> verifica con `python scripts/check_env.py` que aparezca "FaceFusion — disponible".
+> No subas nada a git ni hagas commits.
 
 Claude Code tiene todo el contexto en `CLAUDE.md` para resolver los detalles (CUDA, modelos, troubleshooting).

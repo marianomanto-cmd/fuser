@@ -25,6 +25,9 @@ ENV/
 # Cache de InsightFace
 .insightface/
 
+# Motor opcional FaceFusion (se clona aquí; no se versiona)
+vendor/
+
 # Salidas y temporales
 outputs/
 tmp/

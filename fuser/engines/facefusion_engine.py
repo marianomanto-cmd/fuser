@@ -53,8 +53,26 @@ class FaceFusionNotAvailable(RuntimeError):
         )
 
 
+def _ensure_on_path() -> None:
+    """Si FaceFusion está clonado en ``vendor/facefusion``, lo añade a sys.path.
+
+    Así basta con clonar FaceFusion ahí (lo hace ``scripts/install_facefusion``)
+    para que Fuser lo encuentre, sin tocar PYTHONPATH ni instalarlo como paquete.
+    """
+    import sys
+
+    from ..config import PROJECT_ROOT
+
+    candidate = PROJECT_ROOT / "vendor" / "facefusion"
+    if candidate.exists():
+        path = str(candidate)
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
 def is_available() -> bool:
     """True si los módulos internos de FaceFusion se pueden importar."""
+    _ensure_on_path()
     try:
         importlib.import_module("facefusion")
         return True
@@ -77,6 +95,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def _import(self):
         if self._modules:
             return self._modules
+        _ensure_on_path()
         try:
             state_manager = importlib.import_module("facefusion.state_manager")
             # Analizador de caras (la ruta cambió entre versiones).

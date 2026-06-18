@@ -17,6 +17,9 @@ musicales** (múltiples ángulos, boca abierta, perfiles, mucho movimiento).
 bash scripts/setup.sh            # Linux/macOS  (--cpu para versión CPU)
 scripts\setup.bat                # Windows
 
+# Motor opcional FaceFusion (alta calidad) — clona en vendor/facefusion
+bash scripts/install_facefusion.sh   # Windows: scripts\install_facefusion.bat
+
 # Manual
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # GPU  (requirements-cpu.txt = CPU)

@@ -93,6 +93,21 @@ def main() -> int:
         present = is_downloaded(key)
         print(f"  {OK if present else WARN}{'descargado' if present else 'pendiente '} · {key}")
     print(f"  Carpeta de modelos: {config.MODELS_DIR}")
+    print("-" * 64)
+
+    # --- Motores ---
+    print("Motores de face swap:")
+    print(f"  {OK} InsightFace (Rápido) — incluido")
+    try:
+        from fuser.engines.facefusion_engine import is_available as _ff_available
+        ff = _ff_available()
+    except Exception:
+        ff = False
+    if ff:
+        print(f"  {OK} FaceFusion (Alta Calidad) — disponible")
+    else:
+        print(f"  {WARN}FaceFusion (Alta Calidad) — opcional, no instalado")
+        print("     → Instálalo con:  bash scripts/install_facefusion.sh   (ver INSTALL.md)")
 
     print("=" * 64)
 
