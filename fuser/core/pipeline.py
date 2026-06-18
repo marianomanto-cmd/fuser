@@ -62,6 +62,7 @@ class SwapPipeline:
         self.engine.load(progress=progress)
         self._loaded = True
         log.info("Pipeline listo · motor=%s · %s", self.settings.engine, self.mm.summary())
+        log.info("Capacidades del motor: %s", self.engine.get_capabilities())
 
     @property
     def loaded(self) -> bool:

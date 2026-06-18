@@ -373,6 +373,14 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def supports_adaptive_mouth(self) -> bool:
         return True
 
+    def prefers_two_pass(self) -> bool:
+        return True
+
+    def get_capabilities(self) -> dict:
+        caps = super().get_capabilities()
+        caps["high_res_region"] = True  # pixel boost + enhancer localizado de boca
+        return caps
+
     def enhance_mouth_region(self, frame: np.ndarray, face, openness: float = 1.0) -> np.ndarray:
         """Realce localizado de boca/dientes (interfaz pública). Guardado."""
         if not self.settings.mouth_enhancer or self.settings.mouth_detail <= 0:

@@ -16,6 +16,7 @@ Dos mecanismos complementarios:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import List
 
 import numpy as np
@@ -109,6 +110,30 @@ class TemporalSmoother:
         self._tracks = survivors
         return faces
 
+    @staticmethod
+    def _bbox_from_kps(kps: np.ndarray) -> np.ndarray:
+        x0, y0 = kps.min(axis=0)
+        x1, y1 = kps.max(axis=0)
+        w, h = (x1 - x0), (y1 - y0)
+        return np.array([x0 - 0.6 * w, y0 - 0.9 * h, x1 + 0.6 * w, y1 + 0.7 * h], dtype=np.float32)
+
+    def predict(self) -> List:
+        """Sintetiza caras desde los tracks activos cuando la detección falla.
+
+        Mantiene el swap **estable durante huecos de detección** (perfiles
+        extremos, desenfoque) reutilizando los últimos landmarks conocidos, hasta
+        ``max_ttl`` frames. Evita el parpadeo "aparece/desaparece la cara".
+        """
+        out: List = []
+        survivors: List[_Track] = []
+        for tr in self._tracks:
+            tr.ttl += 1
+            if tr.ttl <= self.max_ttl:
+                survivors.append(tr)
+                out.append(SimpleNamespace(kps=tr.kps.copy(), bbox=self._bbox_from_kps(tr.kps)))
+        self._tracks = survivors
+        return out
+
 
 # ---------------------------------------------------------------------------
 # 2 pasadas: tracking + suavizado centrado bilateral (usa RAM)
@@ -175,19 +200,23 @@ def centered_smooth_kps(
     for i in range(n):
         ki = seq[i]
         scale = _inter_eye(ki)
+        npts = ki.shape[0]
         acc = np.zeros_like(ki, dtype=np.float32)
-        wsum = 0.0
+        wsum = np.zeros((npts, 1), dtype=np.float32)
         for j in range(max(0, i - W), min(n, i + W + 1)):
             wt = np.exp(-((i - j) ** 2) / (2 * time_sigma ** 2))
             if motion_adaptive:
-                d = float(np.linalg.norm(seq[j] - ki, axis=1).mean()) / scale
-                wr = np.exp(-(d ** 2) / (2 * range_rel ** 2))
+                # Término de rango POR PUNTO: cada landmark se suaviza según su
+                # propio movimiento → los puntos rápidos (boca abierta) conservan
+                # su trayectoria; los estables (ojos) se suavizan más.
+                dp = np.linalg.norm(seq[j] - ki, axis=1) / scale          # (npts,)
+                wr = np.exp(-(dp ** 2) / (2 * range_rel ** 2))            # (npts,)
             else:
-                wr = 1.0
-            w = wt * wr
+                wr = np.ones(npts, dtype=np.float32)
+            w = (wt * wr).reshape(-1, 1)                                  # (npts, 1)
             acc += w * seq[j]
             wsum += w
-        out.append((acc / wsum).astype(np.float32) if wsum > 0 else ki)
+        out.append((acc / np.maximum(wsum, 1e-6)).astype(np.float32))
     return out
 
 

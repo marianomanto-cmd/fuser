@@ -382,6 +382,19 @@ FF_PIXEL_BOOST_CHOICES = [
     ("512x512 (máxima calidad, más VRAM)", "512x512"),
 ]
 
+# Config de memoria POR MOTOR (reactiva): FaceFusion (más pesado y lento) recibe
+# buffers y tramos de 2 pasadas mayores y prefiere 2 pasadas por defecto.
+ENGINE_MEMORY_CONFIG: Dict[str, dict] = {
+    ENGINE_INSIGHTFACE: dict(
+        buffer_mult=1.0, buffer_cap_mult=1.0, chunk_mult=1.0, chunk_cap_mult=1.0,
+        prefers_two_pass=False,
+    ),
+    ENGINE_FACEFUSION: dict(
+        buffer_mult=1.4, buffer_cap_mult=1.5, chunk_mult=1.25, chunk_cap_mult=1.5,
+        prefers_two_pass=True,
+    ),
+}
+
 
 # ----------------------------------------------------------------------------
 # Settings del pipeline

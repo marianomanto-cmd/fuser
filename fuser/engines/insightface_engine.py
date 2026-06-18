@@ -252,7 +252,12 @@ class InsightFaceSwapper(BaseFaceSwapper):
     def process_frame(self, frame: np.ndarray, use_smoothing: bool = True) -> np.ndarray:
         faces = self.detect(frame)
         if use_smoothing and self.smoother is not None:
-            faces = self.smoother.smooth(faces, frame.shape)
+            if faces:
+                faces = self.smoother.smooth(faces, frame.shape)
+            else:
+                # Detección fallida en este frame: reutiliza la última cara conocida
+                # (evita el parpadeo de aparecer/desaparecer el swap).
+                faces = self.smoother.predict()
         targets = self.select_targets(faces)
         return self.render(frame, targets)
 

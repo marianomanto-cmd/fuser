@@ -13,7 +13,7 @@ perezosa dentro de ``fuser.models`` para que la UI pueda arrancar al instante
 incluso sin los modelos descargados.
 """
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 __app_name__ = "Fuser"
 
 __all__ = ["__version__", "__app_name__"]

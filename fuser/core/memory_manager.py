@@ -18,7 +18,13 @@ from __future__ import annotations
 
 from typing import List
 
-from ..config import ENGINE_FACEFUSION, RAM_BALANCED, RAM_FRACTIONS, Settings
+from ..config import (
+    ENGINE_FACEFUSION,
+    ENGINE_MEMORY_CONFIG,
+    RAM_BALANCED,
+    RAM_FRACTIONS,
+    Settings,
+)
 from ..utils.logging import get_logger
 from ..utils.system import get_system_info
 
@@ -114,6 +120,14 @@ class MemoryManager:
     def _ram_profile(self) -> dict:
         return RAM_FRACTIONS.get(self.settings.ram_mode, RAM_FRACTIONS[RAM_BALANCED])
 
+    _DEFAULT_ENGINE_CFG = {
+        "buffer_mult": 1.0, "buffer_cap_mult": 1.0, "chunk_mult": 1.0,
+        "chunk_cap_mult": 1.0, "prefers_two_pass": False,
+    }
+
+    def _engine_cfg(self) -> dict:
+        return ENGINE_MEMORY_CONFIG.get(self.settings.engine, self._DEFAULT_ENGINE_CFG)
+
     def buffer_sizes(self, frame_shape) -> tuple:
         """Tamaño de las colas de RAM (prefetch, escritura) — **adaptativo**.
 
@@ -126,10 +140,9 @@ class MemoryManager:
         if not self.info.ram_available_gb:
             return base_pf, base_wq
         prof = self._ram_profile()
-        frac, cap = prof["buffer"], prof["buffer_cap"]
-        if self.is_facefusion:
-            frac *= 1.4
-            cap = int(cap * 1.5)
+        cfg = self._engine_cfg()
+        frac = prof["buffer"] * cfg["buffer_mult"]
+        cap = int(prof["buffer_cap"] * cfg["buffer_cap_mult"])
         h, w = frame_shape[:2]
         frame_mb = (h * w * 3) / (1024 ** 2)
         if frame_mb <= 0:
@@ -150,10 +163,9 @@ class MemoryManager:
         if not self.info.ram_available_gb:
             return 300
         prof = self._ram_profile()
-        frac, cap = prof["chunk"], prof["chunk_cap"]
-        if self.is_facefusion:
-            frac = min(frac * 1.25, 0.85)
-            cap = int(cap * 1.5)
+        cfg = self._engine_cfg()
+        frac = min(prof["chunk"] * cfg["chunk_mult"], 0.85)
+        cap = int(prof["chunk_cap"] * cfg["chunk_cap_mult"])
         h, w = frame_shape[:2]
         frame_mb = max((h * w * 3) / (1024 ** 2), 0.1)
         budget_mb = self.info.ram_available_gb * 1024 * frac
@@ -162,8 +174,8 @@ class MemoryManager:
 
     # ----- API explícita de perfil por motor (legibilidad/mantenibilidad) ------
     def default_two_pass(self) -> bool:
-        """2 pasadas por defecto: **ON con FaceFusion** (prioriza calidad/estabilidad)."""
-        return self.is_facefusion
+        """2 pasadas por defecto: según la config del motor (ON con FaceFusion)."""
+        return bool(self._engine_cfg()["prefers_two_pass"])
 
     def ram_buffer_size(self, frame_shape) -> int:
         """Tamaño del buffer de frames en RAM (alias legible de ``buffer_sizes``)."""
@@ -208,6 +220,17 @@ class MemoryManager:
             "est_buffer_ram_gb": round(buf * 2 * frame_bytes / GIB, 2),
             "two_pass": self.recommend_two_pass(frame_shape),
         }
+
+    def get_memory_stats(self, frame_shape=(1080, 1920)) -> dict:
+        """Métricas + **RAM real del proceso** (psutil) para decisiones de presupuesto."""
+        stats = self.metrics(frame_shape)
+        try:
+            import psutil
+
+            stats["process_ram_gb"] = round(psutil.Process().memory_info().rss / GIB, 2)
+        except Exception:
+            stats["process_ram_gb"] = None
+        return stats
 
     def format_metrics_md(self, frame_shape=(1080, 1920)) -> str:
         """Métricas en Markdown para mostrar en la UI."""

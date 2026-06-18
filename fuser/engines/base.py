@@ -98,9 +98,31 @@ class BaseFaceSwapper(ABC):
         """Realce localizado de boca/dientes para una cara (opcional). Por defecto, no-op."""
         return frame
 
+    def supports_region_enhancement(self) -> bool:
+        """True si el motor puede realzar regiones concretas (boca/ojos) por separado."""
+        return self.supports_adaptive_mouth()
+
+    def prefers_two_pass(self) -> bool:
+        """True si el motor se beneficia de 2 pasadas por defecto (más calidad base)."""
+        return False
+
+    def get_capabilities(self) -> dict:
+        """Capacidades del motor para que el pipeline decida el flujo."""
+        return {
+            "adaptive_mouth": self.supports_adaptive_mouth(),
+            "region_enhancement": self.supports_region_enhancement(),
+            "multi_pass_temporal": self.supports_two_pass(),
+            "prefers_two_pass": self.prefers_two_pass(),
+            "high_res_region": False,
+        }
+
     def get_memory_usage(self) -> dict:
         """Reporta consumo aproximado de memoria del motor (para métricas en la UI)."""
         return {"engine": self.name, "loaded": self.loaded}
+
+    def get_memory_profile(self) -> dict:
+        """Alias semántico de ``get_memory_usage`` (contrato de la interfaz)."""
+        return self.get_memory_usage()
 
     def cleanup(self) -> None:
         """Libera los recursos del motor (modelos/sesiones)."""

@@ -145,6 +145,9 @@ class FaceStore:
             threshold = self.settings.reference_distance
             return [
                 f for f in faces
-                if _embedding_distance(f.normed_embedding, self.reference_embedding) <= threshold
+                # Las caras sintetizadas en huecos de detección no tienen embedding:
+                # se omiten del emparejamiento por referencia (sin romper).
+                if getattr(f, "normed_embedding", None) is not None
+                and _embedding_distance(f.normed_embedding, self.reference_embedding) <= threshold
             ]
         return faces
