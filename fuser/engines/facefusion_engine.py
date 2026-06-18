@@ -68,25 +68,37 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def reset_temporal(self) -> None:
         self._mar_ema = None
 
-    def _dynamic_openness(self, face, frame, mouth_mask) -> float:
-        """Apertura de boca con **umbral dinámico** (baseline por persona).
+    def get_mouth_open_intensity(self, face) -> float:
+        """Intensidad de apertura de boca (0..1) por landmarks + **umbral dinámico**.
 
-        Usa el MAR (distancia vértice superior↔inferior de la boca / ancho) y lo
-        compara con un baseline EMA del propio sujeto (su boca 'neutral'), en vez
-        de un umbral fijo. Así detecta mejor 'boca abierta' en personas con bocas
-        distintas. Cae al contraste local si no hay 106 landmarks.
+        Calcula el ratio **altura/ancho** de la boca (distancia entre los labios
+        superior↔inferior dividida por el ancho) y lo compara con un baseline EMA
+        del propio sujeto (su boca 'neutral'), en vez de un umbral fijo. Devuelve
+        0 si no hay 106 landmarks. Ver también ``is_mouth_open``.
         """
         from ..utils import image as imageutil
 
         mar = imageutil.mouth_aspect_ratio(face.kps, getattr(face, "landmark_2d_106", None))
         if mar is None:
-            return imageutil._region_contrast(frame, mouth_mask)
+            return 0.0
         if self._mar_ema is None:
             self._mar_ema = mar
         else:
             self._mar_ema += 0.04 * (mar - self._mar_ema)
-        floor = float(np.clip(self._mar_ema, 0.15, 0.30))  # umbral dinámico
+        floor = float(np.clip(self._mar_ema, 0.15, 0.30))  # umbral dinámico por persona
         return float(np.clip((mar - floor) / 0.33, 0.0, 1.0))
+
+    def is_mouth_open(self, face, threshold: float = 0.35) -> bool:
+        """Booleano de boca abierta (intensidad por encima del umbral)."""
+        return self.get_mouth_open_intensity(face) >= threshold
+
+    def _dynamic_openness(self, face, frame, mouth_mask) -> float:
+        """Intensidad de apertura; cae al contraste local si no hay 106 landmarks."""
+        if getattr(face, "landmark_2d_106", None) is not None:
+            return self.get_mouth_open_intensity(face)
+        from ..utils import image as imageutil
+
+        return imageutil._region_contrast(frame, mouth_mask)
 
     # ----- post-procesado por regiones (calidad de boca/dientes/ojos) ---------
     def _mouth_open_boost(self) -> float:
@@ -133,26 +145,48 @@ class FaceFusionSwapper(BaseFaceSwapper):
         self._mouth_enh.load()
         return self._mouth_enh
 
-    def _enhance_mouth_region(self, frame, face, openness: float, profile: float):
-        """Pasa CodeFormer por la cara alineada y pega SOLO la boca (dientes nítidos).
+    def _enhance_mouth_region(self, frame, face, intensity: float, profile: float):
+        """Pasa CodeFormer por la cara alineada a 512 y pega SOLO la boca (dientes nítidos).
 
-        El enhancer se ejecuta sobre la cara alineada completa (como debe), pero se
-        compone de vuelta únicamente en la región de la boca, con fuerza escalada
-        por la apertura y atenuada en perfiles fuertes (donde el alineado es menos
-        fiable). Es un 2.º paso de enhancer dedicado a la boca/dientes.
+        El enhancer se ejecuta sobre la cara alineada completa a **512x512** (pixel
+        boost localizado), pero se compone de vuelta únicamente en la región de la
+        boca (máscara suave/gaussiana), con fuerza escalada por la apertura y por
+        ``mouth_enhancement_strength``, y atenuada en perfiles fuertes (donde el
+        alineado es menos fiable).
         """
         from insightface.utils import face_align
 
         from ..utils import image as imageutil
 
+        s = self.settings
         aligned, M = face_align.norm_crop2(frame, face.kps, 512)
-        enhanced = self._ensure_mouth_enhancer().run(aligned, fidelity=self.settings.codeformer_fidelity)
+        enhanced = self._ensure_mouth_enhancer().run(aligned, fidelity=s.codeformer_fidelity)
         kps_aligned = imageutil.transform_points(face.kps, M)
         _, mouth = imageutil.frame_eye_mouth_masks(kps_aligned, (512, 512), self._mouth_open_boost())
-        strength = float(np.clip(self.settings.mouth_detail * openness * (1.0 - 0.4 * profile), 0.0, 1.0))
+        strength = float(np.clip(
+            s.mouth_detail * intensity * s.mouth_enhancement_strength * (1.0 - 0.4 * profile),
+            0.0, 1.0,
+        ))
         return imageutil.paste_back_with_mask(frame, enhanced, M, mouth * strength, opacity=1.0)
 
-    def _postprocess(self, frame: np.ndarray, faces) -> np.ndarray:
+    def _apply_profile_blending(self, out, original, face, profile: float):
+        """En perfiles laterales, mezcla los **bordes** de la cara hacia el original.
+
+        Reduce la opacidad efectiva del swap en mandíbula/oreja (zonas que más se
+        deforman de lado) usando una máscara de cara suave: el núcleo mantiene el
+        swap, el borde recupera el original. Intensidad por ``profile_blending_strength``.
+        """
+        from ..utils import image as imageutil
+
+        strength = float(np.clip(profile * self.settings.profile_blending_strength, 0.0, 1.0))
+        if strength <= 0.01:
+            return out
+        face_mask = imageutil.frame_face_mask(face.kps, out.shape)  # 1 en el núcleo, 0 fuera
+        edge = (1.0 - face_mask)                                    # alto en los bordes
+        a = np.clip(1.0 - strength * edge, 0.0, 1.0)[:, :, None]    # alpha del swap
+        return (out.astype(np.float32) * a + original.astype(np.float32) * (1.0 - a)).astype(np.uint8)
+
+    def _postprocess(self, frame: np.ndarray, faces, original=None) -> np.ndarray:
         """Post-procesado que hace a FaceFusion claramente superior en casos difíciles.
 
         Por cada cara:
@@ -168,7 +202,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         from ..utils import image as imageutil
 
         s = self.settings
-        if not faces or (s.eye_preservation <= 0 and s.mouth_detail <= 0):
+        if not faces:
             return frame
 
         out = frame
@@ -176,19 +210,23 @@ class FaceFusionSwapper(BaseFaceSwapper):
         for f in faces:
             kps = f.kps
             _, mouth_mask = imageutil.frame_eye_mouth_masks(kps, out.shape, boost)
-            openness = self._dynamic_openness(f, out, mouth_mask)
+            intensity = self._dynamic_openness(f, out, mouth_mask)   # 0..1
+            mouth_open = intensity >= 0.35
             profile = float(np.clip((abs(self._yaw(f)) - 20.0) / 50.0, 0.0, 1.0))
 
-            mouth_amt = s.mouth_detail * (0.5 + 0.9 * openness)  # dientes solo si abierta
-            out = imageutil.enhance_regions(
-                out, [kps], eye_strength=s.eye_preservation, mouth_strength=mouth_amt,
-                mouth_open_boost=boost, adaptive_mouth=False,
-            )
-            if s.mouth_enhancer and s.mouth_detail > 0 and openness > 0.35:
-                try:
-                    out = self._enhance_mouth_region(out, f, openness, profile)
-                except Exception as exc:  # pragma: no cover - requiere insightface/modelo
-                    log.warning("Enhancer localizado de boca no disponible (%s); uso solo realce.", exc)
+            # 1) Realce de regiones: ojos siempre; boca escalada por la apertura.
+            if s.eye_preservation > 0 or s.mouth_detail > 0:
+                mouth_amt = s.mouth_detail * (0.5 + 0.9 * intensity)
+                out = imageutil.enhance_regions(
+                    out, [kps], eye_strength=s.eye_preservation, mouth_strength=mouth_amt,
+                    mouth_open_boost=boost, adaptive_mouth=False,
+                )
+            # 2) Enhancer LOCALIZADO (CodeFormer a 512) solo si la boca está abierta.
+            if mouth_open:
+                out = self.enhance_mouth_region(out, f, intensity)
+            # 3) Blending de PERFIL: en caras de lado, recupera el borde original.
+            if original is not None and profile > 0.0:
+                out = self._apply_profile_blending(out, original, f, profile)
         return out
 
     # ----- importación perezosa de FaceFusion ---------------------------------
@@ -384,7 +422,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         out = self._ff_swap(frame)
         # Post-procesado: detectar sobre la salida para alinear el realce de regiones.
         faces = self._detect(out)
-        return self._postprocess(out, faces)
+        return self._postprocess(out, faces, original=frame)
 
     # ----- 2 pasadas: FF swap + post-procesado de regiones ESTABILIZADO --------
     # Pasada 1: detectamos (barato) y suavizamos los landmarks usando RAM.
@@ -404,13 +442,18 @@ class FaceFusionSwapper(BaseFaceSwapper):
         caps["high_res_region"] = True  # pixel boost + enhancer localizado de boca
         return caps
 
-    def enhance_mouth_region(self, frame: np.ndarray, face, openness: float = 1.0) -> np.ndarray:
-        """Realce localizado de boca/dientes (interfaz pública). Guardado."""
-        if not self.settings.mouth_enhancer or self.settings.mouth_detail <= 0:
+    def enhance_mouth_region(self, frame: np.ndarray, face, intensity: float = 1.0) -> np.ndarray:
+        """Realce localizado de boca/dientes (CodeFormer dentro de una máscara suave).
+
+        ``intensity`` (0..1) escala la fuerza (normalmente la apertura de boca).
+        Controlado por ``mouth_enhancer`` + ``use_mouth_pixel_boost`` en config.
+        """
+        s = self.settings
+        if not (s.mouth_enhancer and s.use_mouth_pixel_boost) or s.mouth_detail <= 0:
             return frame
         try:
             profile = float(np.clip((abs(self._yaw(face)) - 20.0) / 50.0, 0.0, 1.0))
-            return self._enhance_mouth_region(frame, face, openness, profile)
+            return self._enhance_mouth_region(frame, face, intensity, profile)
         except Exception as exc:  # pragma: no cover
             log.warning("enhance_mouth_region no disponible: %s", exc)
             return frame
@@ -438,7 +481,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         if self._source_face is None:
             raise RuntimeError("Falta la cara fuente (FaceFusion). Sube imágenes fuente primero.")
         out = self._ff_swap(frame)
-        return self._postprocess(out, targets)
+        return self._postprocess(out, targets, original=frame)
 
     def unload(self) -> None:
         self._modules = {}

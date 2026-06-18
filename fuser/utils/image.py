@@ -255,6 +255,32 @@ def _region_contrast(frame: np.ndarray, mask: np.ndarray) -> float:
     return float(np.clip(std / 55.0, 0.0, 1.0))
 
 
+def frame_face_mask(kps, frame_shape, expand: float = 1.55, blur: float = 0.08) -> np.ndarray:
+    """Máscara elíptica de la cara en coordenadas del **frame completo** (desde 5 kps).
+
+    Núcleo alto en el centro y borde suave; útil para mezclar los bordes de la
+    cara (mandíbula/oreja) hacia el original en perfiles laterales.
+    """
+    h, w = frame_shape[:2]
+    mask = np.zeros((h, w), dtype=np.float32)
+    kps = np.asarray(kps, dtype=np.float32).reshape(-1, 2)
+    if len(kps) < 5:
+        return mask
+    eye_l, eye_r, nose, mouth_l, mouth_r = kps[0], kps[1], kps[2], kps[3], kps[4]
+    eye_c = (eye_l + eye_r) / 2.0
+    mouth_c = (mouth_l + mouth_r) / 2.0
+    center = (eye_c + mouth_c) / 2.0 + (mouth_c - eye_c) * 0.15
+    inter = float(np.linalg.norm(eye_r - eye_l)) + 1e-3
+    vert = float(np.linalg.norm(mouth_c - eye_c)) + 1e-3
+    ax = int(inter * expand)
+    ay = int(vert * 1.7 * expand)
+    angle = float(np.degrees(np.arctan2(eye_r[1] - eye_l[1], eye_r[0] - eye_l[0])))
+    cv2.ellipse(mask, (int(center[0]), int(center[1])), (max(2, ax), max(2, ay)),
+                angle, 0, 360, 1.0, -1)
+    k = _odd(max(3, inter * blur * 3.0))
+    return np.clip(cv2.GaussianBlur(mask, (k, k), 0), 0, 1)
+
+
 def enhance_regions(
     frame: np.ndarray,
     kps_list,

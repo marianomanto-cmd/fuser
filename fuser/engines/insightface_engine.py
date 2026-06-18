@@ -230,14 +230,21 @@ class InsightFaceSwapper(BaseFaceSwapper):
     def supports_adaptive_mouth(self) -> bool:
         return True
 
-    def enhance_mouth_region(self, frame: np.ndarray, face, openness: float = 1.0) -> np.ndarray:
+    def enhance_mouth_region(self, frame: np.ndarray, face, intensity: float = 1.0) -> np.ndarray:
         """Realce localizado de boca (versión básica por unsharp, paridad de interfaz)."""
         if self.settings.mouth_detail <= 0:
             return frame
         _, mouth = imageutil.frame_eye_mouth_masks(face.kps, frame.shape, self._mouth_open_boost())
         return imageutil.apply_local_detail(
-            frame, mouth, amount=self.settings.mouth_detail * 1.4 * float(np.clip(openness, 0, 1))
+            frame, mouth, amount=self.settings.mouth_detail * 1.4 * float(np.clip(intensity, 0, 1))
         )
+
+    def get_mouth_open_intensity(self, face) -> float:
+        """Intensidad de apertura de boca (0..1) por MAR (umbral fijo, versión básica)."""
+        mar = imageutil.mouth_aspect_ratio(face.kps, getattr(face, "landmark_2d_106", None))
+        if mar is None:
+            return 0.0
+        return float(np.clip((mar - 0.22) / 0.33, 0.0, 1.0))
 
     def get_memory_usage(self) -> dict:
         return {

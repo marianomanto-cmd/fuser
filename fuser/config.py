@@ -447,6 +447,9 @@ class Settings:
     eye_preservation: float = 0.4           # realce/nitidez localizado en los ojos
     mouth_detail: float = 0.4               # realce localizado en boca/dientes
     mouth_enhancer: bool = True             # 2.º paso de enhancer (CodeFormer) en boca abierta
+    mouth_enhancement_strength: float = 1.0  # multiplicador del enhancer localizado de boca
+    use_mouth_pixel_boost: bool = True       # pase localizado de boca a 512 (FaceFusion)
+    profile_blending_strength: float = 0.5   # suaviza/baja opacidad en perfiles laterales
     color_match: bool = False               # transferencia de color al original
     processing_resolution: int = 0          # 0 = nativa; si >0 limita el lado mayor
 

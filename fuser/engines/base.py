@@ -94,9 +94,17 @@ class BaseFaceSwapper(ABC):
         """True si el motor puede realzar la boca/dientes localmente (boca abierta)."""
         return False
 
-    def enhance_mouth_region(self, frame: np.ndarray, face, openness: float = 1.0) -> np.ndarray:
+    def enhance_mouth_region(self, frame: np.ndarray, face, intensity: float = 1.0) -> np.ndarray:
         """Realce localizado de boca/dientes para una cara (opcional). Por defecto, no-op."""
         return frame
+
+    def get_mouth_open_intensity(self, face) -> float:
+        """Intensidad de apertura de boca (0..1) a partir de los landmarks. Por defecto 0."""
+        return 0.0
+
+    def is_mouth_open(self, face, threshold: float = 0.35) -> bool:
+        """Booleano de boca abierta (intensidad por encima del umbral)."""
+        return self.get_mouth_open_intensity(face) >= threshold
 
     def supports_region_enhancement(self) -> bool:
         """True si el motor puede realzar regiones concretas (boca/ojos) por separado."""

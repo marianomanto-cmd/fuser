@@ -36,6 +36,7 @@ def _read_image(path: str) -> Optional[np.ndarray]:
 
 def _build_settings(
     engine, ff_swapper_model, ff_pixel_boost,
+    use_mouth_pixel_boost, mouth_enhancement_strength, profile_blending_strength,
     swapper_model, enhancer_model, enhancer_blend, codeformer_fidelity,
     expression_mode,
     face_selector, reference_index, reference_distance, reference_count,
@@ -49,6 +50,9 @@ def _build_settings(
         engine=engine,
         ff_swapper_model=ff_swapper_model,
         ff_pixel_boost=ff_pixel_boost,
+        use_mouth_pixel_boost=bool(use_mouth_pixel_boost),
+        mouth_enhancement_strength=float(mouth_enhancement_strength),
+        profile_blending_strength=float(profile_blending_strength),
         swapper_model=swapper_model,
         enhancer_model=enhancer_model,
         enhancer_blend=float(enhancer_blend),
@@ -340,6 +344,22 @@ def build_interface() -> gr.Blocks:
                     info="Resolución interna a la que corre el swap. Más alto = dientes y ojos más "
                          "nítidos, pero usa más VRAM y va más lento.",
                 )
+            with gr.Row():
+                use_mouth_pixel_boost = gr.Checkbox(
+                    value=True, label="Pixel boost localizado de boca (512)",
+                    info="Reprocesa la boca con CodeFormer a 512 cuando está abierta y la pega con "
+                         "máscara suave. Dientes claramente más definidos.",
+                )
+                mouth_enhancement_strength = gr.Slider(
+                    0.0, 2.0, value=1.0, step=0.1, label="Fuerza del enhancer de boca",
+                    info="Multiplica la fuerza del realce localizado de boca/dientes (1.0 = normal, "
+                         ">1 = más agresivo).",
+                )
+                profile_blending_strength = gr.Slider(
+                    0.0, 1.0, value=0.5, step=0.05, label="Blending en perfiles laterales",
+                    info="En caras de lado, recupera el borde original (mandíbula/oreja) para evitar "
+                         "deformaciones. 0 = nada, 1 = máximo.",
+                )
 
         # ----- Preservación de detalle --------------------------------------
         with gr.Accordion("✨ Preservación de ojos, boca y máscara", open=True):
@@ -491,6 +511,7 @@ def build_interface() -> gr.Blocks:
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
             engine, ff_swapper_model, ff_pixel_boost,
+            use_mouth_pixel_boost, mouth_enhancement_strength, profile_blending_strength,
             swapper_model, enhancer_model, enhancer_blend, codeformer_fidelity,
             expression_mode,
             face_selector, reference_index, reference_distance, reference_count,
