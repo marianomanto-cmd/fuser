@@ -160,6 +160,29 @@ class MemoryManager:
         n = int(budget_mb / frame_mb)
         return max(60, min(n, cap))
 
+    # ----- API explícita de perfil por motor (legibilidad/mantenibilidad) ------
+    def default_two_pass(self) -> bool:
+        """2 pasadas por defecto: **ON con FaceFusion** (prioriza calidad/estabilidad)."""
+        return self.is_facefusion
+
+    def ram_buffer_size(self, frame_shape) -> int:
+        """Tamaño del buffer de frames en RAM (alias legible de ``buffer_sizes``)."""
+        return self.buffer_sizes(frame_shape)[0]
+
+    def temporal_window_frames(self, frame_shape) -> int:
+        """Frames mantenidos en RAM para el suavizado temporal (2 pasadas)."""
+        return self.two_pass_chunk(frame_shape)
+
+    def engine_profile(self, frame_shape=(1080, 1920)) -> dict:
+        """Perfil de memoria activo (para logs/depuración)."""
+        return {
+            "engine": self.settings.engine,
+            "ram_mode": self.settings.ram_mode,
+            "ram_buffer": self.ram_buffer_size(frame_shape),
+            "temporal_window": self.temporal_window_frames(frame_shape),
+            "default_two_pass": self.default_two_pass(),
+        }
+
     def summary(self) -> str:
         dev = "GPU (CUDA)" if self.use_gpu else "CPU"
         enh = "CPU/RAM" if self.enhancer_providers() == self._cpu_providers() else dev

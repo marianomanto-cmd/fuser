@@ -60,7 +60,8 @@ class FaceFusionSwapper(BaseFaceSwapper):
         super().__init__(settings, memory_manager)
         self._modules = {}
         self._source_face = None
-        self._analyser = None  # detector InsightFace para el post-procesado por regiones
+        self._analyser = None    # detector InsightFace para el post-procesado por regiones
+        self._mouth_enh = None   # enhancer (CodeFormer) para el paso localizado de boca
         self._loaded = False
 
     # ----- post-procesado por regiones (calidad de boca/dientes/ojos) ---------
@@ -88,24 +89,84 @@ class FaceFusionSwapper(BaseFaceSwapper):
             log.warning("Detección para post-procesado falló: %s", exc)
             return []
 
-    def _postprocess(self, frame: np.ndarray, faces) -> np.ndarray:
-        """Refuerza boca/dientes y ojos sobre la salida de FaceFusion.
+    def _yaw(self, face) -> float:
+        from ..models.face_analyser import FaceAnalyser
 
-        Es lo que convierte la calidad de FaceFusion en "claramente superior" en
-        los casos difíciles: dientes nítidos al cantar y ojos vivos, sin tocar el
-        resto de la cara. Más agresivo en modo Videos Musicales.
+        return FaceAnalyser.estimate_yaw(face)
+
+    def _ensure_mouth_enhancer(self):
+        """Carga perezosa de CodeFormer para el realce LOCALIZADO de la boca."""
+        if self._mouth_enh is not None:
+            return self._mouth_enh
+        from ..models.downloader import ensure_model
+        from ..models.face_enhancer import FaceEnhancer
+
+        info = config.ENHANCER_MODELS["codeformer"]
+        path = ensure_model("codeformer")
+        on_cpu = not self.mm.use_gpu
+        self._mouth_enh = FaceEnhancer(path, self.mm.enhancer_providers(), info,
+                                       self.mm.session_options(on_cpu))
+        self._mouth_enh.load()
+        return self._mouth_enh
+
+    def _enhance_mouth_region(self, frame, face, openness: float, profile: float):
+        """Pasa CodeFormer por la cara alineada y pega SOLO la boca (dientes nítidos).
+
+        El enhancer se ejecuta sobre la cara alineada completa (como debe), pero se
+        compone de vuelta únicamente en la región de la boca, con fuerza escalada
+        por la apertura y atenuada en perfiles fuertes (donde el alineado es menos
+        fiable). Es un 2.º paso de enhancer dedicado a la boca/dientes.
+        """
+        from insightface.utils import face_align
+
+        from ..utils import image as imageutil
+
+        aligned, M = face_align.norm_crop2(frame, face.kps, 512)
+        enhanced = self._ensure_mouth_enhancer().run(aligned, fidelity=self.settings.codeformer_fidelity)
+        kps_aligned = imageutil.transform_points(face.kps, M)
+        _, mouth = imageutil.frame_eye_mouth_masks(kps_aligned, (512, 512), self._mouth_open_boost())
+        strength = float(np.clip(self.settings.mouth_detail * openness * (1.0 - 0.4 * profile), 0.0, 1.0))
+        return imageutil.paste_back_with_mask(frame, enhanced, M, mouth * strength, opacity=1.0)
+
+    def _postprocess(self, frame: np.ndarray, faces) -> np.ndarray:
+        """Post-procesado que hace a FaceFusion claramente superior en casos difíciles.
+
+        Por cada cara:
+        1) Detecta la **apertura de boca** por landmarks (MAR) — fuerte solo si abierta.
+        2) Realza ojos (siempre) y boca (escalado por apertura) con detalle local.
+        3) Si la boca está abierta, aplica un **enhancer localizado (CodeFormer)** en
+           la boca → dientes nítidos, no borrosos.
+        4) En **perfiles** suaviza el blending (evita costuras en mandíbula/oreja).
+
+        Se puede desactivar por completo con ``mouth_detail=0``/``eye_preservation=0``
+        y el paso de enhancer con ``mouth_enhancer=False``.
         """
         from ..utils import image as imageutil
 
         s = self.settings
-        if (s.eye_preservation <= 0 and s.mouth_detail <= 0) or not faces:
+        if not faces or (s.eye_preservation <= 0 and s.mouth_detail <= 0):
             return frame
-        kps_list = [f.kps for f in faces]
-        return imageutil.enhance_regions(
-            frame, kps_list,
-            eye_strength=s.eye_preservation, mouth_strength=s.mouth_detail,
-            mouth_open_boost=self._mouth_open_boost(),
-        )
+
+        out = frame
+        boost = self._mouth_open_boost()
+        for f in faces:
+            kps = f.kps
+            lmk = getattr(f, "landmark_2d_106", None)
+            _, mouth_mask = imageutil.frame_eye_mouth_masks(kps, out.shape, boost)
+            openness = imageutil.mouth_openness(kps, lmk, out, mouth_mask)
+            profile = float(np.clip((abs(self._yaw(f)) - 20.0) / 50.0, 0.0, 1.0))
+
+            mouth_amt = s.mouth_detail * (0.5 + 0.9 * openness)  # dientes solo si abierta
+            out = imageutil.enhance_regions(
+                out, [kps], eye_strength=s.eye_preservation, mouth_strength=mouth_amt,
+                mouth_open_boost=boost, adaptive_mouth=False,
+            )
+            if s.mouth_enhancer and s.mouth_detail > 0 and openness > 0.35:
+                try:
+                    out = self._enhance_mouth_region(out, f, openness, profile)
+                except Exception as exc:  # pragma: no cover - requiere insightface/modelo
+                    log.warning("Enhancer localizado de boca no disponible (%s); uso solo realce.", exc)
+        return out
 
     # ----- importación perezosa de FaceFusion ---------------------------------
     def _import(self):
@@ -329,4 +390,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         if self._analyser is not None and hasattr(self._analyser, "unload"):
             self._analyser.unload()
         self._analyser = None
+        if self._mouth_enh is not None and hasattr(self._mouth_enh, "unload"):
+            self._mouth_enh.unload()
+        self._mouth_enh = None
         self._loaded = False

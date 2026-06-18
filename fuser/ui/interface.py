@@ -40,7 +40,7 @@ def _build_settings(
     expression_mode,
     face_selector, reference_index, reference_distance, reference_count,
     face_opacity, mask_mode, mask_blur, mask_padding, eye_preservation, mouth_detail,
-    color_match, processing_resolution,
+    mouth_enhancer, color_match, processing_resolution,
     temporal_smoothing, temporal_alpha, motion_adaptive, two_pass_temporal,
     memory_mode, gpu_mem_limit, force_cpu, ram_mode,
     keep_audio, keep_fps, output_quality,
@@ -64,6 +64,7 @@ def _build_settings(
         mask_padding=float(mask_padding),
         eye_preservation=float(eye_preservation),
         mouth_detail=float(mouth_detail),
+        mouth_enhancer=bool(mouth_enhancer),
         color_match=bool(color_match),
         processing_resolution=int(processing_resolution),
         temporal_smoothing=bool(temporal_smoothing),
@@ -175,6 +176,13 @@ def _recommendation(mode: str, engine: str) -> str:
     else:
         extra = " ⚡ *InsightFace: rápido y menos VRAM.*"
     return f"### 💡 Recomendación\n{base}{extra}"
+
+
+def _on_engine_change(engine: str, mode: str):
+    """Al cambiar el motor: actualiza la recomendación y activa 2 pasadas con FaceFusion."""
+    rec = _recommendation(mode, engine)
+    two_pass = gr.update(value=True) if engine == config.ENGINE_FACEFUSION else gr.update()
+    return rec, two_pass
 
 
 def _on_preview(source_files, video_path, n_preview, *control_values, progress=gr.Progress()):
@@ -312,6 +320,10 @@ def build_interface() -> gr.Blocks:
                     0.0, 1.0, value=0.4, step=0.05,
                     label="👄 Detalle de boca/dientes (al cantar)",
                 )
+                mouth_enhancer = gr.Checkbox(
+                    value=True,
+                    label="🦷 Enhancer localizado de boca (CodeFormer, solo FaceFusion + boca abierta)",
+                )
             with gr.Row():
                 mask_mode = gr.Dropdown(
                     choices=list(config.MASK_MODE_LABELS.items()), value=config.MASK_HULL,
@@ -388,7 +400,7 @@ def build_interface() -> gr.Blocks:
             expression_mode,
             face_selector, reference_index, reference_distance, reference_count,
             face_opacity, mask_mode, mask_blur, mask_padding, eye_preservation, mouth_detail,
-            color_match, processing_resolution,
+            mouth_enhancer, color_match, processing_resolution,
             temporal_smoothing, temporal_alpha, motion_adaptive, two_pass_temporal,
             memory_mode, gpu_mem_limit, force_cpu, ram_mode,
             keep_audio, keep_fps, output_quality,
@@ -420,11 +432,11 @@ def build_interface() -> gr.Blocks:
                 recommendation_md,
             ],
         )
-        # Recomendación dinámica también al cambiar el motor manualmente.
+        # Al cambiar el motor: recomendación dinámica + 2 pasadas por defecto con FaceFusion.
         engine.change(
-            lambda eng, mode: _recommendation(mode, eng),
+            _on_engine_change,
             inputs=[engine, expression_mode],
-            outputs=recommendation_md,
+            outputs=[recommendation_md, two_pass_temporal],
         )
 
         preview_btn.click(

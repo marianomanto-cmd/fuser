@@ -423,6 +423,7 @@ class Settings:
     mask_padding: float = 0.0               # recorte interior de la máscara (0..1)
     eye_preservation: float = 0.4           # realce/nitidez localizado en los ojos
     mouth_detail: float = 0.4               # realce localizado en boca/dientes
+    mouth_enhancer: bool = True             # 2.º paso de enhancer (CodeFormer) en boca abierta
     color_match: bool = False               # transferencia de color al original
     processing_resolution: int = 0          # 0 = nativa; si >0 limita el lado mayor
 

@@ -111,20 +111,32 @@ con esa interfaz** → cambiar de motor no toca el resto del código (mantenible
 
 **Por qué FaceFusion rinde claramente mejor en los casos difíciles:**
 - **Boca abierta / dientes:** corre el swap con **pixel boost** (256/512 px) → mucho más detalle que
-  los 128 px base; **además** Fuser aplica un **post-procesado por regiones** sobre la salida que realza
-  **dientes e interior de la boca**. Es **adaptativo a la apertura**: mide el contraste local y realza
-  fuerte **solo cuando se ven los dientes** (boca abierta al cantar), sin sobre-afilar con la boca cerrada.
+  los 128 px base. Fuser **detecta la apertura de la boca por landmarks** (MAR, *mouth aspect ratio*,
+  sin índices fijos) y, cuando está abierta, hace dos cosas: (1) realza la región de boca con fuerza
+  proporcional a la apertura, y (2) ejecuta un **2.º paso de enhancer localizado (CodeFormer)** sobre la
+  cara alineada y lo compone **solo en la boca** → **dientes nítidos, no borrosos**. Con la boca cerrada
+  no toca nada (evita sobre-afilar). Se activa/desactiva con la casilla *Enhancer localizado de boca*.
 - **Perfiles laterales:** detector con umbral más permisivo + **máscaras de oclusión y por región** de
-  FaceFusion → no deforma mandíbula/oreja/nariz y respeta pelo/manos cruzando la cara.
+  FaceFusion → no deforma mandíbula/oreja/nariz y respeta pelo/manos cruzando la cara. Además el
+  post-procesado **estima el perfil por la posición de los landmarks (yaw)** y **suaviza el blending**
+  en perfiles fuertes (donde el alineado es menos fiable), evitando costuras.
 - **Ojos:** post-procesado dirigido que mantiene la **mirada viva** (controlado por *Preservación de ojos*).
 - **2 pasadas también con FaceFusion:** Fuser detecta y **estabiliza** los landmarks en una pasada previa
   (usando RAM) y aplica el realce de boca/ojos con kps suavizados → **sin parpadeo** entre frames.
 
 **Memoria adaptativa según el motor:** FaceFusion consume más VRAM, por eso el offloading a RAM/CPU
 importa más. El modo de memoria de Fuser se mapea a `video_memory_strategy` (tolerant/moderate/strict)
-para que FaceFusion descargue partes a RAM cuando la VRAM esté al límite, **y el `memory_manager` usa
-más RAM con FaceFusion** (buffers ~45% vs ~30%, tramos de 2 pasadas más grandes) para no dejar nunca a
-la GPU esperando. Aprovecha de verdad los 40 GB.
+para que FaceFusion descargue partes a RAM cuando la VRAM esté al límite, **y el `memory_manager` aplica
+dos perfiles**: con **FaceFusion** usa buffers y tramos de 2 pasadas más grandes (×1.4–1.25 + topes
+mayores) y **activa 2 pasadas por defecto**; con **InsightFace** es más conservador. Aprovecha de verdad
+los 40 GB (perfil de RAM **Máximo** para 32 GB+).
+
+**Cómo aprovechar cada motor:**
+- **InsightFace (Rápido):** previsualizar y afinar, vídeos largos, hardware justo, planos frontales.
+  Perfil de RAM *Equilibrado* y 1 pasada suelen bastar.
+- **FaceFusion (Alta Calidad):** el resultado final de un videoclip. Súbele *pixel boost* (256/512),
+  deja el *Enhancer localizado de boca* y las *2 pasadas* activos, perfil de RAM *Máximo* y **5–6
+  referencias**. Prioriza calidad sobre velocidad. El **Modo 🎤 Videos musicales** lo configura todo solo.
 
 **FaceFusion se instala solo:** con Docker o `scripts/setup.sh` ya queda listo; y si lo activas en el
 **toggle** y aún no está, Fuser lo **auto-instala la primera vez** (lo clona en `vendor/facefusion` e

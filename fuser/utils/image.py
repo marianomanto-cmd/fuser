@@ -195,6 +195,51 @@ def frame_eye_mouth_masks(
     return np.clip(eyes, 0, 1), np.clip(mouth, 0, 1)
 
 
+def mouth_aspect_ratio(kps, landmark_106=None) -> Optional[float]:
+    """MAR (mouth aspect ratio) a partir de los 106 landmarks, **sin índices fijos**.
+
+    Mide la extensión **vertical** de los puntos que caen en la banda de la boca
+    respecto al **ancho** de la boca. Robusto a la orientación (usa los ejes de la
+    boca). Devuelve ``None`` si no hay 106 landmarks. MAR bajo = boca cerrada;
+    MAR alto = boca muy abierta (cantando).
+    """
+    if landmark_106 is None:
+        return None
+    pts = np.asarray(landmark_106, dtype=np.float32).reshape(-1, 2)
+    k = np.asarray(kps, dtype=np.float32).reshape(-1, 2)
+    if len(k) < 5 or len(pts) < 20:
+        return None
+    mouth_l, mouth_r = k[3], k[4]
+    mc = (mouth_l + mouth_r) / 2.0
+    axis = mouth_r - mouth_l
+    w = float(np.linalg.norm(axis)) + 1e-3
+    ux = axis / w                       # eje horizontal de la boca
+    uy = np.array([-ux[1], ux[0]], dtype=np.float32)  # eje vertical (perpendicular)
+    rel = pts - mc
+    horiz = rel @ ux
+    vert = rel @ uy
+    # Banda ceñida a la boca: excluye nariz (arriba) y mentón (abajo).
+    band = (np.abs(horiz) < 0.6 * w) & (np.abs(vert) < 0.5 * w)
+    if int(band.sum()) < 6:
+        return None
+    v = vert[band]
+    return float((v.max() - v.min()) / w)
+
+
+def mouth_openness(kps, landmark_106=None, frame=None, mouth_mask=None) -> float:
+    """Apertura de la boca (0..1). Usa MAR de landmarks; si no hay, cae al contraste.
+
+    Es el detector que pide el caso musical: 0 = boca cerrada, 1 = muy abierta.
+    """
+    mar = mouth_aspect_ratio(kps, landmark_106)
+    if mar is not None:
+        # MAR ~0.18-0.25 cerrada ; ~0.5+ muy abierta.
+        return float(np.clip((mar - 0.22) / 0.33, 0.0, 1.0))
+    if frame is not None and mouth_mask is not None:
+        return _region_contrast(frame, mouth_mask)
+    return 0.5
+
+
 def _region_contrast(frame: np.ndarray, mask: np.ndarray) -> float:
     """Contraste local (0..1) dentro de la máscara. Alto = boca abierta con dientes.
 
