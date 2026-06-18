@@ -195,17 +195,35 @@ def frame_eye_mouth_masks(
     return np.clip(eyes, 0, 1), np.clip(mouth, 0, 1)
 
 
+def _region_contrast(frame: np.ndarray, mask: np.ndarray) -> float:
+    """Contraste local (0..1) dentro de la máscara. Alto = boca abierta con dientes.
+
+    Cuando la boca está muy abierta cantando, el interior tiene dientes claros y
+    sombra oscura → mucho contraste. Cerrada (labios) → poco. Sirve para aplicar
+    el realce de dientes SOLO cuando hace falta.
+    """
+    sel = mask > 0.4
+    if sel.sum() < 16:
+        return 0.0
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    std = float(gray[sel].std())
+    return float(np.clip(std / 55.0, 0.0, 1.0))
+
+
 def enhance_regions(
     frame: np.ndarray,
     kps_list,
     eye_strength: float = 0.0,
     mouth_strength: float = 0.0,
     mouth_open_boost: float = 1.0,
+    adaptive_mouth: bool = True,
 ) -> np.ndarray:
     """Realza ojos y boca/dientes en el frame para una o varias caras.
 
-    Post-procesado independiente del motor: se aplica sobre el frame ya compuesto
-    (ideal para reforzar la salida de FaceFusion en boca/dientes/ojos).
+    Post-procesado independiente del motor (ideal para reforzar la salida de
+    FaceFusion). Con ``adaptive_mouth`` la fuerza en la boca se **modula por el
+    contraste local**: cuando se ven los dientes (boca abierta al cantar) realza
+    más; con la boca cerrada no sobre-afila.
     """
     out = frame
     for kps in kps_list:
@@ -215,7 +233,11 @@ def enhance_regions(
         if eye_strength > 0 and eyes.max() > 0:
             out = apply_local_detail(out, eyes, amount=eye_strength * 1.2, radius=radius)
         if mouth_strength > 0 and mouth.max() > 0:
-            out = apply_local_detail(out, mouth, amount=mouth_strength * 1.4, radius=radius)
+            m_str = mouth_strength
+            if adaptive_mouth:
+                openness = _region_contrast(out, mouth)  # 0..1
+                m_str = mouth_strength * (0.6 + 0.9 * openness)  # cerrada ~0.6x, abierta ~1.5x
+            out = apply_local_detail(out, mouth, amount=m_str * 1.4, radius=radius)
     return out
 
 

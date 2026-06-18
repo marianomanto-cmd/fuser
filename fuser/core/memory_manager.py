@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import List
 
-from ..config import ENGINE_FACEFUSION, Settings
+from ..config import ENGINE_FACEFUSION, RAM_BALANCED, RAM_FRACTIONS, Settings
 from ..utils.logging import get_logger
 from ..utils.system import get_system_info
 
@@ -111,52 +111,60 @@ class MemoryManager:
     def is_facefusion(self) -> bool:
         return self.settings.engine == ENGINE_FACEFUSION
 
-    def buffer_sizes(self, frame_shape) -> tuple:
-        """Tamaño de las colas de RAM (prefetch, escritura) — **adaptativo al motor**.
+    def _ram_profile(self) -> dict:
+        return RAM_FRACTIONS.get(self.settings.ram_mode, RAM_FRACTIONS[RAM_BALANCED])
 
-        Con ``ram_boost`` se dimensionan según la **RAM libre real**. Con FaceFusion
-        (más lento y pesado) se reserva MÁS RAM (~45% vs ~30%) y colas más grandes,
-        para que el decodificado vaya muy por delante y la GPU nunca espere. En
-        una máquina con 40 GB esto mantiene saturado el cómputo de FaceFusion.
+    def buffer_sizes(self, frame_shape) -> tuple:
+        """Tamaño de las colas de RAM (prefetch, escritura) — **adaptativo**.
+
+        Depende del **perfil de RAM** (conservador/equilibrado/máximo) y del
+        **motor**: FaceFusion (más lento y pesado) recibe un extra (~×1.4 de
+        fracción y topes mayores) para que el decodificado vaya muy por delante y
+        la GPU nunca espere. Con perfil "máximo" en 32 GB+ los buffers son enormes.
         """
         base_pf, base_wq = self.prefetch_frames, self.writer_queue
-        if not self.settings.ram_boost or not self.info.ram_available_gb:
+        if not self.info.ram_available_gb:
             return base_pf, base_wq
+        prof = self._ram_profile()
+        frac, cap = prof["buffer"], prof["buffer_cap"]
+        if self.is_facefusion:
+            frac *= 1.4
+            cap = int(cap * 1.5)
         h, w = frame_shape[:2]
         frame_mb = (h * w * 3) / (1024 ** 2)
         if frame_mb <= 0:
             return base_pf, base_wq
-        fraction = 0.45 if self.is_facefusion else 0.30
-        cap = 1400 if self.is_facefusion else 800
-        budget_mb = self.info.ram_available_gb * 1024 * fraction
+        budget_mb = self.info.ram_available_gb * 1024 * frac
         n = int(budget_mb / frame_mb / 2)
         n = max(base_pf, min(n, cap))
         return n, n
 
     def two_pass_chunk(self, frame_shape) -> int:
-        """Nº de frames por tramo en 2 pasadas (acota RAM) — **adaptativo al motor**.
+        """Nº de frames por tramo en 2 pasadas (acota RAM) — **adaptativo**.
 
-        Guarda un tramo de frames en RAM para suavizar landmarks con ventana
-        centrada (no causal). Con FaceFusion se usan tramos más grandes (~55% de
-        la RAM libre) → ventanas de estabilización más amplias y mejor
-        consistencia temporal de la boca/ojos.
+        Tramos más grandes = ventanas de estabilización más amplias = mejor
+        consistencia temporal. Escala con el perfil de RAM y, con FaceFusion, se
+        agranda aún más. Con perfil "máximo" en clips cortos cabe el vídeo entero
+        en RAM (suavizado global, máxima estabilidad).
         """
         if not self.info.ram_available_gb:
             return 300
+        prof = self._ram_profile()
+        frac, cap = prof["chunk"], prof["chunk_cap"]
+        if self.is_facefusion:
+            frac = min(frac * 1.25, 0.85)
+            cap = int(cap * 1.5)
         h, w = frame_shape[:2]
         frame_mb = max((h * w * 3) / (1024 ** 2), 0.1)
-        fraction = 0.55 if self.is_facefusion else 0.45
-        cap = 6000 if self.is_facefusion else 4000
-        budget_mb = self.info.ram_available_gb * 1024 * fraction
+        budget_mb = self.info.ram_available_gb * 1024 * frac
         n = int(budget_mb / frame_mb)
         return max(60, min(n, cap))
 
     def summary(self) -> str:
         dev = "GPU (CUDA)" if self.use_gpu else "CPU"
         enh = "CPU/RAM" if self.enhancer_providers() == self._cpu_providers() else dev
-        boost = "ON" if self.settings.ram_boost else "OFF"
         return (
             f"Cómputo: {dev} | Enhancer: {enh} | "
             f"Límite VRAM/sesión: {self.settings.gpu_mem_limit_gb:.1f} GB | "
-            f"det_size: {self.det_size} | RAM-boost: {boost}"
+            f"det_size: {self.det_size} | RAM: {self.settings.ram_mode} | motor: {self.settings.engine}"
         )

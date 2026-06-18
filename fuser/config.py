@@ -99,6 +99,29 @@ MEMORY_PRESETS: Dict[str, dict] = {
 
 
 # ----------------------------------------------------------------------------
+# Perfiles de RAM (cuánta RAM del sistema usar para buffers y 2 pasadas)
+# ----------------------------------------------------------------------------
+RAM_CONSERVATIVE = "conservador"
+RAM_BALANCED = "equilibrado"
+RAM_MAX = "maximo"
+
+RAM_MODE_LABELS: Dict[str, str] = {
+    "Conservador (poca RAM)": RAM_CONSERVATIVE,
+    "Equilibrado (recomendado)": RAM_BALANCED,
+    "Máximo aprovechamiento (32 GB+ RAM)": RAM_MAX,
+}
+
+# Fracción de la RAM LIBRE para los buffers de frames y para el tramo de 2
+# pasadas, con topes de seguridad (nº de frames). El motor FaceFusion recibe un
+# extra encima de estos valores (ver memory_manager).
+RAM_FRACTIONS: Dict[str, dict] = {
+    RAM_CONSERVATIVE: dict(buffer=0.15, chunk=0.30, buffer_cap=500, chunk_cap=2000),
+    RAM_BALANCED: dict(buffer=0.30, chunk=0.45, buffer_cap=900, chunk_cap=4000),
+    RAM_MAX: dict(buffer=0.50, chunk=0.70, buffer_cap=2200, chunk_cap=9000),
+}
+
+
+# ----------------------------------------------------------------------------
 # Registro de modelos
 # ----------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -291,6 +314,7 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         mask_mode=MASK_HULL, eye_preservation=0.35, mouth_detail=0.35,
         color_match=False, temporal_smoothing=True, temporal_alpha=0.55,
         motion_adaptive=True, two_pass_temporal=False, reference_count=1,
+        ram_mode=RAM_BALANCED,
     ),
     EXPR_MUSIC_VIDEO: dict(
         # Modo musical inteligente: recomienda FaceFusion (alta calidad), muchas
@@ -305,6 +329,7 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         motion_adaptive=True,        # nada de "lag" en la boca al cantar
         two_pass_temporal=True,      # estabilidad sin lag (usa RAM)
         reference_count=6,           # 4-6 ángulos/expresiones
+        ram_mode=RAM_MAX,            # exprime la RAM (40 GB) para máxima estabilidad
     ),
     EXPR_HIGH_EXPRESSION: dict(
         engine="facefusion",
@@ -312,6 +337,7 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         mask_mode=MASK_HULL, eye_preservation=0.85, mouth_detail=0.95,
         color_match=True, temporal_smoothing=True, temporal_alpha=0.4,
         motion_adaptive=True, two_pass_temporal=True, reference_count=6,
+        ram_mode=RAM_MAX,
     ),
 }
 
@@ -410,7 +436,7 @@ class Settings:
     memory_mode: str = MODE_BALANCED
     gpu_mem_limit_gb: float = 0.0           # 0 = usar el del preset
     force_cpu: bool = False                 # forzar ejecución solo en CPU
-    ram_boost: bool = True                  # dimensiona buffers según la RAM libre
+    ram_mode: str = RAM_BALANCED            # perfil de RAM (conservador/equilibrado/máximo)
 
     # --- Salida ---
     keep_audio: bool = True

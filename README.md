@@ -112,7 +112,8 @@ con esa interfaz** → cambiar de motor no toca el resto del código (mantenible
 **Por qué FaceFusion rinde claramente mejor en los casos difíciles:**
 - **Boca abierta / dientes:** corre el swap con **pixel boost** (256/512 px) → mucho más detalle que
   los 128 px base; **además** Fuser aplica un **post-procesado por regiones** sobre la salida que realza
-  los **dientes y el interior de la boca** sin tocar el resto (controlado por *Detalle de boca*).
+  **dientes e interior de la boca**. Es **adaptativo a la apertura**: mide el contraste local y realza
+  fuerte **solo cuando se ven los dientes** (boca abierta al cantar), sin sobre-afilar con la boca cerrada.
 - **Perfiles laterales:** detector con umbral más permisivo + **máscaras de oclusión y por región** de
   FaceFusion → no deforma mandíbula/oreja/nariz y respeta pelo/manos cruzando la cara.
 - **Ojos:** post-procesado dirigido que mantiene la **mirada viva** (controlado por *Preservación de ojos*).
@@ -195,8 +196,10 @@ como buffer elástico para que la GPU nunca espere por el disco.**
   de GPU. Los **buffers de frames viven en RAM** (decenas/cientos de frames según el modo).
 - **Backpressure acotado:** las colas tienen tamaño máximo (`prefetch_frames`, `writer_queue`) para
   usar mucha RAM **pero de forma controlada**, sin desbordarla.
-- **Dimensionado dinámico por RAM (`ram_boost`):** los buffers se ajustan a la **RAM libre real**
-  (reservando ~30%), de modo que en una máquina con 40 GB la GPU casi nunca espera por el disco.
+- **Perfil de RAM + adaptativo al motor (`ram_mode`):** los buffers se ajustan a la **RAM libre real**
+  según el perfil — **Conservador / Equilibrado / Máximo (32 GB+)** — y el motor: **FaceFusion recibe
+  más RAM** (buffers y tramos mayores) que InsightFace. Con perfil **Máximo** en 40 GB los buffers son
+  enormes y la GPU casi nunca espera por el disco.
 - **2 pasadas por tramos en RAM (`two_pass_temporal`):** opción de máxima estabilidad. Carga un
   **tramo de frames en RAM** (tamaño calculado según la RAM libre), suaviza los landmarks con una
   **ventana centrada** (no causal → sin lag) y luego renderiza. Aprovecha la RAM para una calidad
@@ -216,6 +219,7 @@ como buffer elástico para que la GPU nunca espere por el disco.**
 
 - ✅ **Solo face swap de vídeo** (sin distracciones).
 - ✅ **Dos motores con selector**: **InsightFace (Rápido)** y **FaceFusion (Alta Calidad)**.
+- ✅ **Recomendaciones automáticas en la UI** según el modo y el motor elegidos.
 - ✅ **Modo "🎤 Videos musicales"** que activa la mejor configuración para caras cantando.
 - ✅ **Multi-referencia robusta**: varias fotos (ángulos/expresiones), ponderadas por frontalidad
   y con **rechazo de outliers**, en un único vector de identidad (no cuesta VRAM).
@@ -360,7 +364,9 @@ para validar la interfaz y el flujo:
 - **Límite de VRAM por sesión (GB):** `0 = automático` (usa el del modo). Súbelo/bájalo manualmente
   para afinar.
 - **Forzar CPU:** todo en CPU (sin GPU). Muy lento; solo para probar.
-- **Usar más RAM (`ram_boost`):** dimensiona los buffers según la RAM libre (ideal con 40 GB).
+- **Uso de RAM (`ram_mode`):** **Conservador / Equilibrado / Máximo (32 GB+)**. "Máximo" usa la mayor
+  parte de la RAM libre para buffers y tramos de 2 pasadas (ideal con 40 GB). FaceFusion recibe extra
+  automáticamente. El **Modo Videos Musicales** lo pone en **Máximo** solo.
 - **2 pasadas (`two_pass_temporal`):** máxima estabilidad temporal usando la RAM; ideal para
   videoclips con cabeza en movimiento. No aumenta la VRAM.
 - **Resolución de procesamiento:** *Nativa* = máxima calidad; baja a 1080p/720p para ahorrar

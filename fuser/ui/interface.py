@@ -42,7 +42,7 @@ def _build_settings(
     face_opacity, mask_mode, mask_blur, mask_padding, eye_preservation, mouth_detail,
     color_match, processing_resolution,
     temporal_smoothing, temporal_alpha, motion_adaptive, two_pass_temporal,
-    memory_mode, gpu_mem_limit, force_cpu, ram_boost,
+    memory_mode, gpu_mem_limit, force_cpu, ram_mode,
     keep_audio, keep_fps, output_quality,
 ) -> config.Settings:
     return config.Settings(
@@ -73,7 +73,7 @@ def _build_settings(
         memory_mode=memory_mode,
         gpu_mem_limit_gb=float(gpu_mem_limit),
         force_cpu=bool(force_cpu),
-        ram_boost=bool(ram_boost),
+        ram_mode=ram_mode,
         keep_audio=bool(keep_audio),
         keep_fps=bool(keep_fps),
         output_quality=int(output_quality),
@@ -133,8 +133,9 @@ def _on_refresh_system() -> str:
 def _apply_expression_mode(mode: str):
     """Al elegir un Modo, rellena los controles con los valores recomendados."""
     preset = config.EXPRESSION_PRESETS.get(mode, config.EXPRESSION_PRESETS[config.EXPR_STANDARD])
+    eng = preset.get("engine", config.ENGINE_INSIGHTFACE)
     return (
-        preset.get("engine", config.ENGINE_INSIGHTFACE),
+        eng,
         preset["enhancer_model"],
         preset["enhancer_blend"],
         preset.get("codeformer_fidelity", 0.7),
@@ -146,7 +147,34 @@ def _apply_expression_mode(mode: str):
         preset["motion_adaptive"],
         preset["two_pass_temporal"],
         preset["reference_count"],
+        preset.get("ram_mode", config.RAM_BALANCED),
+        _recommendation(mode, eng),
     )
+
+
+def _recommendation(mode: str, engine: str) -> str:
+    """Recomendación automática según el modo y el motor elegidos (para la UI)."""
+    tips = {
+        config.EXPR_MUSIC_VIDEO: (
+            "🎤 **Videos musicales** — usa **FaceFusion** y sube **4–6 fotos** (frontal, 3/4 y "
+            "perfil; con boca abierta y cerrada). Activado: post-procesado de **boca/dientes**, "
+            "**2 pasadas** y **RAM al máximo**. Previsualiza un frame con la boca abierta y uno de perfil."
+        ),
+        config.EXPR_HIGH_EXPRESSION: (
+            "😮 **Alta expresión** — FaceFusion + realce fuerte de **boca y ojos**. Ideal para "
+            "primeros planos muy expresivos."
+        ),
+        config.EXPR_STANDARD: (
+            "**Uso general** — **InsightFace** es más rápido y suele bastar. Cambia a **FaceFusion** "
+            "si necesitas más calidad en **boca abierta o perfiles**."
+        ),
+    }
+    base = tips.get(mode, "")
+    if engine == config.ENGINE_FACEFUSION:
+        extra = " ⏳ *FaceFusion prioriza calidad: más lento y más VRAM. Se instala solo la 1ª vez.*"
+    else:
+        extra = " ⚡ *InsightFace: rápido y menos VRAM.*"
+    return f"### 💡 Recomendación\n{base}{extra}"
 
 
 def _on_preview(source_files, video_path, n_preview, *control_values, progress=gr.Progress()):
@@ -236,6 +264,9 @@ def build_interface() -> gr.Blocks:
                 info="Cambia entre rápido (InsightFace) y alta calidad (FaceFusion).",
             )
         gr.Markdown(config.ENGINE_INFO_MD)
+        recommendation_md = gr.Markdown(
+            _recommendation(config.EXPR_STANDARD, config.ENGINE_INSIGHTFACE)
+        )
 
         # ----- Modo (caso de uso) -------------------------------------------
         with gr.Row():
@@ -330,18 +361,21 @@ def build_interface() -> gr.Blocks:
             with gr.Row():
                 memory_mode = gr.Dropdown(
                     choices=list(config.MEMORY_MODE_LABELS.items()),
-                    value=config.MODE_BALANCED, label="Modo de memoria",
+                    value=config.MODE_BALANCED, label="Modo de memoria (VRAM)",
+                )
+                ram_mode = gr.Dropdown(
+                    choices=list(config.RAM_MODE_LABELS.items()),
+                    value=config.RAM_BALANCED, label="Uso de RAM (buffers / 2 pasadas)",
                 )
                 gpu_mem_limit = gr.Slider(
                     0.0, 12.0, value=0.0, step=0.5, label="Límite VRAM/sesión (GB, 0=auto)",
                 )
+            with gr.Row():
                 processing_resolution = gr.Dropdown(
                     choices=[("Nativa (máxima calidad)", 0), ("1440p", 1440), ("1080p", 1080),
                              ("720p (rápido)", 720), ("512p (muy rápido)", 512)],
                     value=0, label="Resolución de procesamiento",
                 )
-            with gr.Row():
-                ram_boost = gr.Checkbox(value=True, label="Usar más RAM (buffers grandes)")
                 force_cpu = gr.Checkbox(value=False, label="Forzar CPU (sin GPU)")
                 keep_audio = gr.Checkbox(value=True, label="Conservar audio")
                 keep_fps = gr.Checkbox(value=True, label="Conservar FPS")
@@ -356,7 +390,7 @@ def build_interface() -> gr.Blocks:
             face_opacity, mask_mode, mask_blur, mask_padding, eye_preservation, mouth_detail,
             color_match, processing_resolution,
             temporal_smoothing, temporal_alpha, motion_adaptive, two_pass_temporal,
-            memory_mode, gpu_mem_limit, force_cpu, ram_boost,
+            memory_mode, gpu_mem_limit, force_cpu, ram_mode,
             keep_audio, keep_fps, output_quality,
         ]
 
@@ -382,8 +416,15 @@ def build_interface() -> gr.Blocks:
             outputs=[
                 engine, enhancer_model, enhancer_blend, codeformer_fidelity, mask_mode,
                 eye_preservation, mouth_detail, color_match, temporal_alpha,
-                motion_adaptive, two_pass_temporal, reference_count,
+                motion_adaptive, two_pass_temporal, reference_count, ram_mode,
+                recommendation_md,
             ],
+        )
+        # Recomendación dinámica también al cambiar el motor manualmente.
+        engine.change(
+            lambda eng, mode: _recommendation(mode, eng),
+            inputs=[engine, expression_mode],
+            outputs=recommendation_md,
         )
 
         preview_btn.click(
