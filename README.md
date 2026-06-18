@@ -201,6 +201,21 @@ como buffer elástico para que la GPU nunca espere por el disco.**
 
 ## 🚀 Instalación (local con GPU)
 
+> 📘 **Guía completa y solución de problemas en [`INSTALL.md`](INSTALL.md)** (incluye CUDA/onnxruntime,
+> notas de Windows y un **prompt listo para instalar con Claude Code**). Contexto para asistentes en
+> [`CLAUDE.md`](CLAUDE.md).
+
+**Instalación en un comando** (crea `.venv`, instala, baja modelos y diagnostica):
+
+```bash
+git clone https://github.com/marianomanto-cmd/fuser.git
+cd fuser
+bash scripts/setup.sh        # Linux/macOS   (Windows: scripts\setup.bat)
+python app.py                # abre http://127.0.0.1:7860
+```
+
+**Instalación manual:**
+
 ```bash
 # 1) Clonar
 git clone https://github.com/marianomanto-cmd/fuser.git
@@ -213,10 +228,13 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 # 3) Dependencias (GPU NVIDIA / CUDA)
 pip install -r requirements.txt
 
-# 4) (Opcional) Pre-descargar modelos
+# 4) Diagnóstico de entorno (¿GPU? ¿qué falta?)
+python scripts/check_env.py
+
+# 5) (Opcional) Pre-descargar modelos
 python scripts/download_models.py
 
-# 5) Lanzar
+# 6) Lanzar
 python app.py
 # Abre http://127.0.0.1:7860
 ```
@@ -289,9 +307,13 @@ fuser/
 ├── requirements.txt           # Dependencias GPU (CUDA)
 ├── requirements-cpu.txt       # Dependencias CPU / Spaces
 ├── README.md
+├── INSTALL.md                 # Guía de instalación local (CUDA, Windows, Claude Code)
+├── CLAUDE.md                  # Contexto del proyecto para Claude Code
 ├── .gitignore
 ├── LICENSE
 ├── scripts/
+│   ├── setup.sh / setup.bat   # Instalación automática (Linux/macOS · Windows)
+│   ├── check_env.py           # Doctor de entorno (GPU/RAM/modelos)
 │   └── download_models.py     # Pre-descarga de modelos
 ├── models/                    # Modelos ONNX (auto-descarga; ignorado por git)
 └── fuser/
