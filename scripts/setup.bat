@@ -13,8 +13,11 @@ cd /d "%~dp0\.."
 
 set REQ=requirements.txt
 set WITH_FF=1
+set RUN_DEMO=0
 if "%1"=="--cpu" ( set REQ=requirements-cpu.txt & set WITH_FF=0 & echo ^>^> Modo CPU )
 if "%1"=="--no-facefusion" ( set WITH_FF=0 )
+if "%1"=="--demo" ( set RUN_DEMO=1 )
+if "%2"=="--demo" ( set RUN_DEMO=1 )
 
 echo ^>^> Creando entorno virtual en .venv ...
 python -m venv .venv
@@ -37,10 +40,18 @@ if "%WITH_FF%"=="1" (
 echo ^>^> Diagnostico de entorno:
 python scripts\check_env.py
 
+if "%RUN_DEMO%"=="1" (
+    echo ^>^> Ejecutando la prueba automática ...
+    python scripts\run_demo.py
+)
+
 echo.
 echo ============================================================
 echo  Listo. Para usar la app:
 echo    .venv\Scripts\activate
 echo    python app.py        ^>  http://127.0.0.1:7860
+echo.
+echo  PRIMERA PRUEBA recomendada (descarga stock y prueba features):
+echo    python scripts\run_demo.py        ( resultados en la carpeta prueba\ )
 echo ============================================================
 endlocal

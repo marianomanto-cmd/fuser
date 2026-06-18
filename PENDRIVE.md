@@ -40,7 +40,10 @@ Haz:
    - CUDAExecutionProvider disponible
    - modelos como "descargado"
    - FaceFusion como "disponible"
-6) Lanza  python app.py  y dime la URL.
+6) Primera prueba:  python scripts/run_demo.py  (baja una foto fuente de stock y prueba varias
+   configuraciones). Si te pide el clip objetivo, baja uno corto de una mujer cantando que se pase la
+   mano por la cara, guárdalo como prueba/target.mp4 y reejecuta. Deja los resultados en prueba/.
+7) Lanza  python app.py  y dime la URL.
 No subas nada a git ni hagas commits.
 ```
 
@@ -59,6 +62,7 @@ bash scripts/setup.sh --no-facefusion   # crea venv, instala deps y BAJA SOLO lo
 mkdir -p vendor && cp -r "$KIT"/facefusion vendor/facefusion   # FaceFusion del pendrive
 
 python scripts/check_env.py    # verifica GPU + modelos + FaceFusion
+python scripts/run_demo.py     # PRIMERA PRUEBA: baja stock y prueba features -> carpeta prueba/
 python app.py                  # http://127.0.0.1:7860
 ```
 
@@ -72,6 +76,7 @@ New-Item -ItemType Directory -Force vendor | Out-Null
 Copy-Item -Recurse "$KIT\facefusion" vendor\facefusion
 
 python scripts\check_env.py
+python scripts\run_demo.py
 python app.py
 ```
 

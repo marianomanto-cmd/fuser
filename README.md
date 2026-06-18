@@ -299,6 +299,15 @@ python app.py                # abre http://127.0.0.1:7860
 En cualquiera de las dos: abre la UI y usa el **toggle "🧠 Motor de Face Swap"** para elegir
 **InsightFace (Rápido)** o **FaceFusion (Alta Calidad)**. Listo.
 
+**▶️ Primera prueba (recomendada, recién instalada):**
+```bash
+python scripts/run_demo.py     # baja una foto fuente de stock, pide/usa un clip y prueba varias
+                               # configuraciones (InsightFace, modo musical, FaceFusion) → carpeta prueba/
+```
+Descarga sola la **foto fuente**; para el **vídeo** pásale `--video <URL>` o coloca un clip de una mujer
+cantando (que se pase la mano por la cara) en `prueba/target.mp4` (las webs de stock bloquean la descarga
+automática). Compara los `out_*.mp4` y `preview_*.png` de `prueba/` y quédate con la mejor configuración.
+
 **Instalación manual:**
 
 ```bash

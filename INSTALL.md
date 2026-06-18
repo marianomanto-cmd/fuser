@@ -166,6 +166,32 @@ python app.py --port 7861
 
 ---
 
+## ▶️ Primera prueba automática (lo PRIMERO tras instalar)
+
+Antes de usar la UI conviene **comprobar que todo funciona** con un test de extremo a extremo.
+`scripts/run_demo.py` baja una **foto fuente** de stock (una cara realista), usa un **clip objetivo**
+(idealmente una mujer cantando que se pasa la mano por la cara, para probar **boca abierta + oclusión +
+perfiles**) y corre **varias configuraciones** (InsightFace rápido, modo musical y FaceFusion si está
+instalado), guardando previsualizaciones y vídeos en la carpeta **`prueba/`**:
+
+```bash
+python scripts/run_demo.py
+# o pasando tu propio clip:
+python scripts/run_demo.py --video <URL_o_ruta_del_clip>
+```
+
+- La **foto fuente** se descarga sola.
+- El **clip objetivo**: si no pasás `--video` ni dejás `prueba/target.mp4`, el script te indica de dónde
+  bajar uno corto (las webs de stock bloquean la descarga por bot, así que ese clip se pone **a mano una
+  sola vez**). También podés fijarlo con la variable `FUSER_DEMO_VIDEO=/ruta/clip.mp4`.
+- Al terminar, **comparás** los `out_*.mp4` y `preview_*.png` de `prueba/` y te quedás con la
+  configuración que mejor se vea.
+
+> Atajo: `bash scripts/setup.sh --demo` (Windows: `scripts\setup.bat --demo`) instala **y** corre esta
+> prueba al final, en un solo paso.
+
+---
+
 ## 📦 Instalar desde un pendrive
 
 En el pendrive **solo hace falta llevar `facefusion/`** (la carpeta pesada). Los `.onnx` de Fuser y el
@@ -190,7 +216,9 @@ python scripts/check_env.py                         # modelos "descargado" + Fac
 > La carpeta del pendrive está en: `<RUTA_REAL>` (reemplaza por la ruta real; si no la sabes, búscala).
 > Pasos: 1) crea `.venv` e instala `requirements.txt`; 2) copia `<RUTA_REAL>/facefusion` a `vendor/facefusion`;
 > 3) corre `python scripts/download_models.py` (baja solos los .onnx de Fuser + buffalo_l);
-> 4) corre `python scripts/check_env.py` y arregla lo que falte (CUDA incluido); 5) lanza `python app.py`.
+> 4) corre `python scripts/check_env.py` y arregla lo que falte (CUDA incluido);
+> 5) **primera prueba:** corre `python scripts/run_demo.py` (baja foto fuente; si pide el clip objetivo,
+> bájalo y guárdalo como `prueba/target.mp4`) y deja los resultados en `prueba/`; 6) lanza `python app.py`.
 > No hagas commits.
 
 ---
@@ -263,7 +291,11 @@ En la PC con la GPU, clona el repo, abre **Claude Code** dentro de la carpeta `f
 > 3) asegúrate de que `onnxruntime-gpu` coincide con mi CUDA (ejecuta `nvidia-smi` y, si hace falta,
 > reinstala con el índice de CUDA 11.8); 4) corre `python scripts/check_env.py` y arrégla lo que falte
 > hasta que aparezca `CUDAExecutionProvider`; 5) descarga los modelos con `python scripts/download_models.py`;
-> 6) lanza `python app.py` y dime la URL.
+> 6) **Primera prueba:** corre `python scripts/run_demo.py`, que baja una foto fuente de stock y una
+> prueba de extremo a extremo; si te pide el clip objetivo (una mujer cantando que se pasa la mano por
+> la cara), descarga uno corto, guárdalo como `prueba/target.mp4` y vuelve a correrlo. Deja los
+> resultados en `prueba/` y dime cómo salieron;
+> 7) lanza `python app.py` y dime la URL.
 > Opcional (máxima calidad): instala el motor FaceFusion con `bash scripts/install_facefusion.sh` y
 > verifica con `python scripts/check_env.py` que aparezca "FaceFusion — disponible".
 > Si traigo **FaceFusion** en un **pendrive**, te indico la ruta y copias `facefusion` a `vendor/facefusion`

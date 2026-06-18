@@ -30,6 +30,7 @@ vendor/
 
 # Salidas y temporales
 outputs/
+prueba/
 tmp/
 temp/
 *.mp4

@@ -15,10 +15,12 @@ cd "$(dirname "$0")/.."
 PYTHON="${PYTHON:-python3}"
 REQ="requirements.txt"
 WITH_FF=1
+RUN_DEMO=0
 for arg in "$@"; do
     case "$arg" in
         --cpu) REQ="requirements-cpu.txt"; WITH_FF=0; echo ">> Modo CPU";;
         --no-facefusion) WITH_FF=0;;
+        --demo) RUN_DEMO=1;;
     esac
 done
 
@@ -44,9 +46,17 @@ fi
 echo ">> Diagnóstico de entorno:"
 python scripts/check_env.py || true
 
+if [ "$RUN_DEMO" = "1" ]; then
+    echo ">> Ejecutando la prueba automática (descarga material de stock y prueba features) ..."
+    python scripts/run_demo.py || true
+fi
+
 echo ""
 echo "============================================================"
 echo " Listo. Para usar la app:"
 echo "   source .venv/bin/activate"
 echo "   python app.py        →  http://127.0.0.1:7860"
+echo ""
+echo " 👉 PRIMERA PRUEBA recomendada (descarga stock y prueba features):"
+echo "   python scripts/run_demo.py        # resultados en la carpeta prueba/"
 echo "============================================================"

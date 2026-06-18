@@ -29,6 +29,7 @@ pip install -r requirements.txt          # GPU  (requirements-cpu.txt = CPU)
 
 python scripts/check_env.py              # DOCTOR: qué falta, GPU, RAM, modelos
 python scripts/download_models.py [--all]# pre-descargar modelos
+python scripts/run_demo.py               # PRIMERA PRUEBA: baja stock + prueba features -> carpeta prueba/
 python app.py                            # lanza la UI -> http://127.0.0.1:7860
 python app.py --share                    # enlace público temporal
 ```
