@@ -254,6 +254,9 @@ como buffer elástico para que la GPU nunca espere por el disco.**
 > 📘 **Guía completa y solución de problemas en [`INSTALL.md`](INSTALL.md)** (incluye CUDA/onnxruntime,
 > notas de Windows y un **prompt listo para instalar con Claude Code**). Contexto para asistentes en
 > [`CLAUDE.md`](CLAUDE.md).
+>
+> 📦 **¿Traés los modelos/FaceFusion en un pendrive?** → **[`PENDRIVE.md`](PENDRIVE.md)** tiene las
+> instrucciones y los prompts listos (acordate de indicar la **ruta real del pendrive**).
 
 > 🎯 **Objetivo: instalas una vez y en la UI eliges el motor con un toggle (InsightFace ↔ FaceFusion).**
 > Ambos motores y los modelos quedan listos en la instalación; no tienes que clonar nada más.
@@ -375,6 +378,7 @@ fuser/
 ├── requirements-facefusion.txt# Motor opcional FaceFusion (alta calidad)
 ├── README.md
 ├── INSTALL.md                 # Guía de instalación local (CUDA, Windows, Claude Code)
+├── PENDRIVE.md                # Instalar offline desde un pendrive (kit de modelos)
 ├── CLAUDE.md                  # Contexto del proyecto para Claude Code
 ├── Dockerfile                 # Imagen con CUDA + ambos motores + modelos
 ├── docker-compose.yml         # `docker compose up` con GPU
