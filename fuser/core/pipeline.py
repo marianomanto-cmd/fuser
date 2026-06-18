@@ -246,6 +246,8 @@ class SwapPipeline:
         # (el suavizado adaptativo mantiene la boca rápida sin "lag").
         music = self.settings.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
         time_sigma = 3.0 if music else 2.0
+        if self.mm.is_facefusion:
+            time_sigma += 0.5  # mejor calidad base -> tolera suavizado más fuerte
         log.info("2 pasadas · tramo de %d frames en RAM · time_sigma=%.1f", chunk, time_sigma)
         processed = 0
         start = time.time()

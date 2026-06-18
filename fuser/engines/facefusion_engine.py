@@ -370,6 +370,31 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def supports_two_pass(self) -> bool:
         return True
 
+    def supports_adaptive_mouth(self) -> bool:
+        return True
+
+    def enhance_mouth_region(self, frame: np.ndarray, face, openness: float = 1.0) -> np.ndarray:
+        """Realce localizado de boca/dientes (interfaz pública). Guardado."""
+        if not self.settings.mouth_enhancer or self.settings.mouth_detail <= 0:
+            return frame
+        try:
+            profile = float(np.clip((abs(self._yaw(face)) - 20.0) / 50.0, 0.0, 1.0))
+            return self._enhance_mouth_region(frame, face, openness, profile)
+        except Exception as exc:  # pragma: no cover
+            log.warning("enhance_mouth_region no disponible: %s", exc)
+            return frame
+
+    def get_memory_usage(self) -> dict:
+        return {
+            "engine": self.name,
+            "loaded": self._loaded,
+            "providers": "cuda" if self.mm.use_gpu else "cpu",
+            "video_memory_strategy": _VRAM_STRATEGY.get(self.settings.memory_mode, "moderate"),
+            "swapper_loaded": "swapper" in self._modules,
+            "mouth_enhancer_loaded": self._mouth_enh is not None,
+            "analyser_loaded": self._analyser is not None,
+        }
+
     def detect(self, frame: np.ndarray):
         return self._detect(frame)
 

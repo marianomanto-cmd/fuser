@@ -183,6 +183,48 @@ class MemoryManager:
             "default_two_pass": self.default_two_pass(),
         }
 
+    def recommend_two_pass(self, frame_shape) -> bool:
+        """Decide **dinámicamente** 1 vs 2 pasadas: ON si el motor las usa por
+        defecto (FaceFusion) Y hay RAM para un tramo razonable (>=120 frames)."""
+        if not self.default_two_pass():
+            return False
+        return self.two_pass_chunk(frame_shape) >= 120
+
+    def metrics(self, frame_shape=(1080, 1920)) -> dict:
+        """Métricas de memoria (VRAM/RAM/buffers) para la UI y los logs."""
+        info = self.info
+        h, w = frame_shape[:2]
+        frame_bytes = h * w * 3
+        buf = self.ram_buffer_size(frame_shape)
+        return {
+            "engine": self.settings.engine,
+            "ram_mode": self.settings.ram_mode,
+            "vram_total_gb": info.vram_total_gb,
+            "vram_free_gb": info.vram_free_gb,
+            "ram_total_gb": info.ram_total_gb,
+            "ram_available_gb": info.ram_available_gb,
+            "ram_buffer_frames": buf,
+            "temporal_window_frames": self.temporal_window_frames(frame_shape),
+            "est_buffer_ram_gb": round(buf * 2 * frame_bytes / GIB, 2),
+            "two_pass": self.recommend_two_pass(frame_shape),
+        }
+
+    def format_metrics_md(self, frame_shape=(1080, 1920)) -> str:
+        """Métricas en Markdown para mostrar en la UI."""
+        m = self.metrics(frame_shape)
+        lines = ["**📊 Memoria estimada (vídeo 1080p)**"]
+        if m["vram_total_gb"]:
+            lines.append(f"- VRAM: {m['vram_free_gb']:.1f} / {m['vram_total_gb']:.1f} GB")
+        if m["ram_available_gb"]:
+            lines.append(f"- RAM libre: {m['ram_available_gb']:.1f} GB")
+        lines.append(f"- Motor: **{m['engine']}** · perfil RAM: **{m['ram_mode']}**")
+        lines.append(
+            f"- Buffer de frames en RAM: **{m['ram_buffer_frames']}** (~{m['est_buffer_ram_gb']} GB) · "
+            f"ventana 2 pasadas: **{m['temporal_window_frames']}** frames"
+        )
+        lines.append(f"- 2 pasadas por defecto: **{'sí' if m['two_pass'] else 'no'}**")
+        return "\n".join(lines)
+
     def summary(self) -> str:
         dev = "GPU (CUDA)" if self.use_gpu else "CPU"
         enh = "CPU/RAM" if self.enhancer_providers() == self._cpu_providers() else dev

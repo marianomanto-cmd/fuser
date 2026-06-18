@@ -157,9 +157,10 @@ def _recommendation(mode: str, engine: str) -> str:
     """Recomendación automática según el modo y el motor elegidos (para la UI)."""
     tips = {
         config.EXPR_MUSIC_VIDEO: (
-            "🎤 **Videos musicales** — usa **FaceFusion** y sube **4–6 fotos** (frontal, 3/4 y "
-            "perfil; con boca abierta y cerrada). Activado: post-procesado de **boca/dientes**, "
-            "**2 pasadas** y **RAM al máximo**. Previsualiza un frame con la boca abierta y uno de perfil."
+            "🎤 **Videos musicales** — ✅ **Se activó FaceFusion** + **post-procesado agresivo de "
+            "boca/dientes** + **2 pasadas** + **RAM al máximo** + **6 referencias** recomendadas. "
+            "Sube **4–6 fotos** (frontal, 3/4 y perfil; con boca abierta y cerrada) y previsualiza un "
+            "frame con la boca abierta y uno de perfil."
         ),
         config.EXPR_HIGH_EXPRESSION: (
             "😮 **Alta expresión** — FaceFusion + realce fuerte de **boca y ojos**. Ideal para "
@@ -183,6 +184,19 @@ def _on_engine_change(engine: str, mode: str):
     rec = _recommendation(mode, engine)
     two_pass = gr.update(value=True) if engine == config.ENGINE_FACEFUSION else gr.update()
     return rec, two_pass
+
+
+def _memory_panel(engine: str, ram_mode: str, memory_mode: str, force_cpu: bool) -> str:
+    """Métricas de memoria estimadas (se actualizan al cambiar motor/perfil)."""
+    from ..core.memory_manager import MemoryManager
+
+    s = config.Settings(
+        engine=engine, ram_mode=ram_mode, memory_mode=memory_mode, force_cpu=bool(force_cpu)
+    )
+    try:
+        return MemoryManager(s).format_metrics_md()
+    except Exception:
+        return ""
 
 
 def _on_preview(source_files, video_path, n_preview, *control_values, progress=gr.Progress()):
@@ -299,14 +313,17 @@ def build_interface() -> gr.Blocks:
                 codeformer_fidelity = gr.Slider(
                     0.0, 1.0, value=0.7, step=0.05, label="Fidelidad CodeFormer (0=detalle, 1=fiel)",
                 )
+
+        # ----- FaceFusion avanzado (opcional, colapsable) -------------------
+        with gr.Accordion("⚙️ FaceFusion avanzado (resolución interna del swap)", open=False):
             with gr.Row():
                 ff_swapper_model = gr.Dropdown(
                     choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
-                    label="FaceFusion · modelo de swap (solo motor FaceFusion)",
+                    label="Modelo de swap de FaceFusion",
                 )
                 ff_pixel_boost = gr.Dropdown(
                     choices=config.FF_PIXEL_BOOST_CHOICES, value="256x256",
-                    label="FaceFusion · pixel boost (resolución del swap)",
+                    label="Pixel boost (resolución interna: 256/512 = más calidad, más VRAM)",
                 )
 
         # ----- Preservación de detalle --------------------------------------
@@ -392,6 +409,9 @@ def build_interface() -> gr.Blocks:
                 keep_audio = gr.Checkbox(value=True, label="Conservar audio")
                 keep_fps = gr.Checkbox(value=True, label="Conservar FPS")
                 output_quality = gr.Slider(12, 30, value=18, step=1, label="Calidad de salida (CRF)")
+            mem_info_md = gr.Markdown(
+                _memory_panel(config.ENGINE_INSIGHTFACE, config.RAM_BALANCED, config.MODE_BALANCED, False)
+            )
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
@@ -438,6 +458,10 @@ def build_interface() -> gr.Blocks:
             inputs=[engine, expression_mode],
             outputs=[recommendation_md, two_pass_temporal],
         )
+        # Panel de métricas de memoria en vivo (motor / perfil de RAM / modo VRAM).
+        _mem_inputs = [engine, ram_mode, memory_mode, force_cpu]
+        for _comp in (engine, ram_mode, memory_mode, force_cpu):
+            _comp.change(_memory_panel, inputs=_mem_inputs, outputs=mem_info_md)
 
         preview_btn.click(
             _on_preview,

@@ -135,9 +135,22 @@ class InsightFaceSwapper(BaseFaceSwapper):
         self.parser.load()
         return self.parser
 
+    def _profile_factor(self, target_face) -> float:
+        """0 = frontal, 1 = perfil fuerte (a partir del yaw estimado por kps)."""
+        try:
+            yaw = abs(self.analyser.estimate_yaw(target_face))
+        except Exception:
+            return 0.0
+        return float(np.clip((yaw - 20.0) / 50.0, 0.0, 1.0))
+
     def _build_face_mask(self, frame, target_face, affine, size):
         s = self.settings
         mode = s.mask_mode
+        # En perfiles, suaviza más el borde de la máscara (InsightFace es menos
+        # fiable de lado) → evita costuras en mandíbula/oreja.
+        profile = self._profile_factor(target_face)
+        blur = float(np.clip(s.mask_blur + 0.18 * profile, 0.0, 0.9))
+
         if mode == config.MASK_PARSING:
             try:
                 parser = self._ensure_parser()
@@ -145,7 +158,7 @@ class InsightFaceSwapper(BaseFaceSwapper):
                 target_aligned = self._aligned_crop(frame, aff512, 512)
                 masks = parser.region_masks(target_aligned)
                 fm = cv2.resize(masks["face"], (size, size), interpolation=cv2.INTER_LINEAR)
-                fm = imageutil._feather(fm, s.mask_blur * 0.5)
+                fm = imageutil._feather(fm, blur * 0.5)
                 if fm.max() > 0.2:
                     return np.clip(fm, 0.0, 1.0)
             except Exception as exc:  # pragma: no cover
@@ -155,13 +168,13 @@ class InsightFaceSwapper(BaseFaceSwapper):
             lmk = getattr(target_face, "landmark_2d_106", None)
             if lmk is not None:
                 pts = imageutil.transform_points(lmk, affine)
-                return imageutil.convex_hull_mask(pts, size, blur=s.mask_blur, padding=s.mask_padding)
+                return imageutil.convex_hull_mask(pts, size, blur=blur, padding=s.mask_padding)
             kps_a = imageutil.transform_points(target_face.kps, affine)
-            return imageutil.ellipse_face_mask(kps_a, size, blur=s.mask_blur, padding=s.mask_padding)
+            return imageutil.ellipse_face_mask(kps_a, size, blur=blur, padding=s.mask_padding)
         if mode == config.MASK_ELLIPSE:
             kps_a = imageutil.transform_points(target_face.kps, affine)
-            return imageutil.ellipse_face_mask(kps_a, size, blur=s.mask_blur, padding=s.mask_padding)
-        return imageutil.build_soft_mask(size, size, blur=s.mask_blur, padding=s.mask_padding)
+            return imageutil.ellipse_face_mask(kps_a, size, blur=blur, padding=s.mask_padding)
+        return imageutil.build_soft_mask(size, size, blur=blur, padding=s.mask_padding)
 
     def _swap_one(self, frame: np.ndarray, target_face) -> np.ndarray:
         s = self.settings
@@ -213,6 +226,28 @@ class InsightFaceSwapper(BaseFaceSwapper):
 
     def supports_two_pass(self) -> bool:
         return True
+
+    def supports_adaptive_mouth(self) -> bool:
+        return True
+
+    def enhance_mouth_region(self, frame: np.ndarray, face, openness: float = 1.0) -> np.ndarray:
+        """Realce localizado de boca (versión básica por unsharp, paridad de interfaz)."""
+        if self.settings.mouth_detail <= 0:
+            return frame
+        _, mouth = imageutil.frame_eye_mouth_masks(face.kps, frame.shape, self._mouth_open_boost())
+        return imageutil.apply_local_detail(
+            frame, mouth, amount=self.settings.mouth_detail * 1.4 * float(np.clip(openness, 0, 1))
+        )
+
+    def get_memory_usage(self) -> dict:
+        return {
+            "engine": self.name,
+            "loaded": self._loaded,
+            "providers": "cuda" if self.mm.use_gpu else "cpu",
+            "swapper_loaded": self.swapper is not None and getattr(self.swapper, "loaded", False),
+            "enhancer_loaded": self.enhancer is not None,
+            "parser_loaded": self.parser is not None,
+        }
 
     def process_frame(self, frame: np.ndarray, use_smoothing: bool = True) -> np.ndarray:
         faces = self.detect(frame)
