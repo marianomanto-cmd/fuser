@@ -35,6 +35,7 @@ def _read_image(path: str) -> Optional[np.ndarray]:
 
 
 def _build_settings(
+    engine, ff_swapper_model, ff_pixel_boost,
     swapper_model, enhancer_model, enhancer_blend, codeformer_fidelity,
     expression_mode,
     face_selector, reference_index, reference_distance, reference_count,
@@ -45,6 +46,9 @@ def _build_settings(
     keep_audio, keep_fps, output_quality,
 ) -> config.Settings:
     return config.Settings(
+        engine=engine,
+        ff_swapper_model=ff_swapper_model,
+        ff_pixel_boost=ff_pixel_boost,
         swapper_model=swapper_model,
         enhancer_model=enhancer_model,
         enhancer_blend=float(enhancer_blend),
@@ -222,6 +226,15 @@ def build_interface() -> gr.Blocks:
                 system_md = gr.Markdown(format_system_summary())
                 refresh_btn = gr.Button("🔄 Actualizar estado del sistema", size="sm")
 
+        # ----- Motor de face swap -------------------------------------------
+        with gr.Row():
+            engine = gr.Dropdown(
+                choices=list(config.ENGINE_LABELS.items()),
+                value=config.ENGINE_INSIGHTFACE,
+                label="🧠 Motor de Face Swap",
+            )
+        gr.Markdown(config.ENGINE_INFO_MD)
+
         # ----- Modo (caso de uso) -------------------------------------------
         with gr.Row():
             expression_mode = gr.Dropdown(
@@ -244,6 +257,15 @@ def build_interface() -> gr.Blocks:
                 enhancer_blend = gr.Slider(0.0, 1.0, value=0.8, step=0.05, label="Fuerza del enhancer")
                 codeformer_fidelity = gr.Slider(
                     0.0, 1.0, value=0.7, step=0.05, label="Fidelidad CodeFormer (0=detalle, 1=fiel)",
+                )
+            with gr.Row():
+                ff_swapper_model = gr.Dropdown(
+                    choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
+                    label="FaceFusion · modelo de swap (solo motor FaceFusion)",
+                )
+                ff_pixel_boost = gr.Dropdown(
+                    choices=config.FF_PIXEL_BOOST_CHOICES, value="256x256",
+                    label="FaceFusion · pixel boost (resolución del swap)",
                 )
 
         # ----- Preservación de detalle --------------------------------------
@@ -325,6 +347,7 @@ def build_interface() -> gr.Blocks:
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
+            engine, ff_swapper_model, ff_pixel_boost,
             swapper_model, enhancer_model, enhancer_blend, codeformer_fidelity,
             expression_mode,
             face_selector, reference_index, reference_distance, reference_count,

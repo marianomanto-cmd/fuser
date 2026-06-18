@@ -315,11 +315,50 @@ REFERENCE_COUNT_CHOICES = [
 
 
 # ----------------------------------------------------------------------------
+# Motor de face swap
+# ----------------------------------------------------------------------------
+ENGINE_INSIGHTFACE = "insightface"
+ENGINE_FACEFUSION = "facefusion"
+
+ENGINE_LABELS: Dict[str, str] = {
+    "InsightFace (Rápido)": ENGINE_INSIGHTFACE,
+    "FaceFusion (Alta Calidad)": ENGINE_FACEFUSION,
+}
+
+ENGINE_INFO_MD = (
+    "**🧠 Motor de Face Swap**  \n"
+    "- **InsightFace (Rápido):** más rápido y consume **menos VRAM**. Buen resultado general; "
+    "incluye el compositing por regiones de Fuser (ojos/boca/contorno) y el modo de 2 pasadas.  \n"
+    "- **FaceFusion (Alta Calidad):** mejor en **boca abierta, dientes y perfiles laterales** "
+    "(usa *pixel boost* y máscaras de oclusión/región), pero es **más lento y usa más VRAM**. "
+    "Requiere FaceFusion instalado (`pip install facefusion`)."
+)
+
+# Opciones específicas de FaceFusion expuestas en la UI.
+FF_SWAPPER_CHOICES = [
+    ("inswapper_128 (estándar)", "inswapper_128"),
+    ("inswapper_128_fp16 (menos VRAM)", "inswapper_128_fp16"),
+    ("hyperswap_1a_256 (mayor resolución)", "hyperswap_1a_256"),
+    ("hyperswap_1b_256", "hyperswap_1b_256"),
+]
+FF_PIXEL_BOOST_CHOICES = [
+    ("128x128 (rápido, menos VRAM)", "128x128"),
+    ("256x256 (recomendado)", "256x256"),
+    ("512x512 (máxima calidad, más VRAM)", "512x512"),
+]
+
+
+# ----------------------------------------------------------------------------
 # Settings del pipeline
 # ----------------------------------------------------------------------------
 @dataclass
 class Settings:
     """Conjunto completo de parámetros de un trabajo de face swap."""
+
+    # --- Motor de face swap ---
+    engine: str = ENGINE_INSIGHTFACE
+    ff_swapper_model: str = "inswapper_128"  # solo FaceFusion
+    ff_pixel_boost: str = "256x256"          # solo FaceFusion (resolución del swap)
 
     # --- Modelos ---
     swapper_model: str = "inswapper_128"

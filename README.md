@@ -28,8 +28,9 @@ usarla en tu máquina.
 
 ## 📑 Tabla de contenidos
 1. [Investigación: ¿qué backend y por qué?](#-investigación-qué-backend-y-por-qué)
-2. [🎤 Optimización para videos musicales](#-optimización-para-videos-musicales-v11)
-3. [Cómo aprovecha los 8 GB VRAM + 40 GB RAM](#-cómo-aprovecha-los-8-gb-vram--40-gb-ram)
+2. [🔀 Dos motores de face swap](#-dos-motores-de-face-swap-elige-en-la-ui)
+3. [🎤 Optimización para videos musicales](#-optimización-para-videos-musicales-v11)
+4. [Cómo aprovecha los 8 GB VRAM + 40 GB RAM](#-cómo-aprovecha-los-8-gb-vram--40-gb-ram)
 3. [Características](#-características)
 4. [Requisitos de hardware](#-requisitos-de-hardware)
 5. [Instalación (local con GPU)](#-instalación-local-con-gpu)
@@ -88,6 +89,36 @@ En resumen: **mejor relación calidad/VRAM/usabilidad** para 8 GB es el stack **
 
 ---
 
+## 🔀 Dos motores de face swap (elige en la UI)
+
+Fuser soporta **dos motores intercambiables** con el selector **"🧠 Motor de Face Swap"**.
+La arquitectura usa una interfaz **`BaseFaceSwapper`** (`fuser/engines/`) y el `pipeline` habla **solo
+con esa interfaz** → cambiar de motor no toca el resto del código (mantenible a futuro).
+
+| Motor | Cuándo usarlo | Fortalezas | Coste |
+|---|---|---|---|
+| **InsightFace (Rápido)** | Uso general, hardware justo, previsualizar | Rápido, **menos VRAM**; compositing por regiones (ojos/boca/contorno) + **2 pasadas** | Calidad alta |
+| **FaceFusion (Alta Calidad)** | Videos musicales exigentes: **boca abierta, dientes, perfiles** | *pixel boost* (swap a 256/512), **máscaras de oclusión/región**, multi-ref nativa | Más lento, **más VRAM** |
+
+**Cómo se integró** (entregable de arquitectura):
+- **`InsightFaceSwapper`** — el pipeline propio de Fuser (todo lo de v1.1) detrás de la interfaz.
+- **`FaceFusionSwapper`** — adaptador que **importa los módulos internos de FaceFusion** (no la CLI:
+  `facefusion.processors.modules.face_swapper` / `face_enhancer` + su analizador) y los conduce frame a
+  frame. Inyecta **nuestros execution providers** y la **estrategia de VRAM** (`video_memory_strategy`)
+  desde el `memory_manager`, y usa su **multi-referencia nativa** (cara promedio de varias fotos).
+- Es **opcional**: si FaceFusion no está instalado, el motor **degrada con un mensaje claro** y
+  sigues con InsightFace.
+
+**Memoria con FaceFusion:** consume más VRAM, por eso el offloading a RAM/CPU importa más. El modo de
+memoria de Fuser se mapea a `video_memory_strategy` (tolerant/moderate/strict) para que FaceFusion
+descargue partes a RAM cuando la VRAM esté al límite. Las **2 pasadas** (suavizado temporal centrado en
+RAM) están disponibles con **InsightFace**; con FaceFusion se aprovecha su propia consistencia + los
+buffers de RAM de Fuser.
+
+**Instalar FaceFusion (opcional):** ver [`requirements-facefusion.txt`](requirements-facefusion.txt).
+
+---
+
 ## 🎤 Optimización para videos musicales (v1.1)
 
 Fuser está afinado para el caso exigente de **caras de mujeres cantando en videos
@@ -110,6 +141,10 @@ expresiones intensas y mucho movimiento de cabeza.
 > el EMA clásico, reduciendo a la vez el temblor de los landmarks ~25×.
 
 ### Controles específicos
+- **🧠 Motor**: para **máxima calidad** en boca/dientes/perfiles elige **FaceFusion (Alta Calidad)**;
+  para velocidad y menos VRAM, **InsightFace (Rápido)**. Con FaceFusion + modo musical se suben
+  automáticamente el *pixel boost*, la fuerza del enhancer y las máscaras de oclusión/región, y se
+  recomienda usar **4–6 referencias**.
 - **🎤 Modo "Videos musicales"**: con un clic activa CodeFormer, máscara de contorno,
   preservación alta de ojos/boca, color match, suavizado adaptativo, **2 pasadas** y
   recomienda **5 referencias**.
@@ -166,6 +201,7 @@ como buffer elástico para que la GPU nunca espere por el disco.**
 ## ✨ Características
 
 - ✅ **Solo face swap de vídeo** (sin distracciones).
+- ✅ **Dos motores con selector**: **InsightFace (Rápido)** y **FaceFusion (Alta Calidad)**.
 - ✅ **Modo "🎤 Videos musicales"** que activa la mejor configuración para caras cantando.
 - ✅ **Multi-referencia robusta**: varias fotos (ángulos/expresiones), ponderadas por frontalidad
   y con **rechazo de outliers**, en un único vector de identidad (no cuesta VRAM).
@@ -306,6 +342,7 @@ fuser/
 ├── app.py                     # Entrypoint Gradio (local + Hugging Face Spaces)
 ├── requirements.txt           # Dependencias GPU (CUDA)
 ├── requirements-cpu.txt       # Dependencias CPU / Spaces
+├── requirements-facefusion.txt# Motor opcional FaceFusion (alta calidad)
 ├── README.md
 ├── INSTALL.md                 # Guía de instalación local (CUDA, Windows, Claude Code)
 ├── CLAUDE.md                  # Contexto del proyecto para Claude Code
@@ -317,7 +354,11 @@ fuser/
 │   └── download_models.py     # Pre-descarga de modelos
 ├── models/                    # Modelos ONNX (auto-descarga; ignorado por git)
 └── fuser/
-    ├── config.py              # Settings, presets de memoria, registro de modelos
+    ├── config.py              # Settings, presets de memoria, registro de modelos, motores
+    ├── engines/               # 🔀 Motores intercambiables (BaseFaceSwapper)
+    │   ├── base.py             # Interfaz abstracta + fábrica
+    │   ├── insightface_engine.py  # Motor InsightFace (pipeline propio refactorizado)
+    │   └── facefusion_engine.py   # Motor FaceFusion (adaptador a módulos internos)
     ├── models/                # Envoltorios ONNX
     │   ├── downloader.py       # Descarga perezosa, verificable y con fallback manual
     │   ├── face_analyser.py    # InsightFace buffalo_l (detección + embeddings + yaw)
@@ -328,7 +369,7 @@ fuser/
     │   ├── memory_manager.py   # VRAM/RAM, providers, offloading, buffers por RAM
     │   ├── face_store.py       # Multi-referencia robusta + selección de objetivos
     │   ├── temporal.py         # Suavizado adaptativo + 2 pasadas (bilateral centrado)
-    │   └── pipeline.py         # Orquestación (1/2 pasadas, compositing por regiones, ETA)
+    │   └── pipeline.py         # Orquestación agnóstica al motor (1/2 pasadas, ETA, RAM)
     ├── utils/
     │   ├── system.py           # Detección de GPU/VRAM/RAM/FFmpeg
     │   ├── video.py            # Lectura/escritura de vídeo + audio (FFmpeg)

@@ -1,0 +1,27 @@
+# ============================================================================
+# Motor OPCIONAL "FaceFusion (Alta Calidad)".
+#
+# FaceFusion no siempre se instala con un simple `pip install`. Instálalo
+# siguiendo su repo oficial y asegúrate de que `import facefusion` funciona en
+# el MISMO entorno virtual que Fuser:
+#
+#   git clone https://github.com/facefusion/facefusion
+#   cd facefusion
+#   pip install -r requirements.txt          # instala sus dependencias
+#   # opción A: instalarlo como paquete editable
+#   pip install -e .
+#   # opción B: exportar PYTHONPATH a la carpeta de facefusion
+#   #   (Linux/macOS)  export PYTHONPATH=/ruta/a/facefusion:$PYTHONPATH
+#   #   (Windows)      set PYTHONPATH=C:\ruta\a\facefusion;%PYTHONPATH%
+#
+# Si existe un paquete compatible en PyPI para tu versión, también puedes probar:
+#   pip install facefusion
+#
+# IMPORTANTE:
+# - FaceFusion usa más VRAM. En 8 GB, empieza con pixel boost 256x256 y, si te
+#   quedas sin VRAM, baja a 128x128 o usa un modo de memoria más estricto.
+# - Fuser usa FaceFusion de forma OPCIONAL: si no está instalado, el motor
+#   degrada con un mensaje claro y puedes seguir usando "InsightFace (Rápido)".
+# - La API interna de FaceFusion varía entre versiones; este adaptador apunta a
+#   FaceFusion 3.x. Si tu versión difiere, verás un error claro al cargar el motor.
+# ============================================================================

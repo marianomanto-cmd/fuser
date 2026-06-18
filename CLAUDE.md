@@ -38,7 +38,11 @@ Si no aparece CUDA: revisar driver NVIDIA y **emparejar `onnxruntime-gpu` con la
 ```
 app.py                      # entrypoint Gradio (también HF Spaces); expone `demo`
 fuser/
-  config.py                 # Settings, presets de memoria, registro de modelos, modos de expresión
+  config.py                 # Settings, presets de memoria, registro de modelos, motores, expresión
+  engines/                  # MOTORES intercambiables (selector en la UI)
+    base.py                 #   BaseFaceSwapper (interfaz) + fábrica create_engine
+    insightface_engine.py   #   InsightFaceSwapper (pipeline propio: compositing por regiones)
+    facefusion_engine.py    #   FaceFusionSwapper (adaptador a módulos internos de FaceFusion)
   models/                   # envoltorios ONNX (import perezoso de onnxruntime/insightface)
     downloader.py           #   descarga perezosa con fallback manual
     face_analyser.py        #   InsightFace buffalo_l (detección + embeddings + yaw)
@@ -49,7 +53,7 @@ fuser/
     memory_manager.py       #   providers CUDA/CPU, gpu_mem_limit, buffers según RAM, offloading
     face_store.py           #   multi-referencia robusta + selección de caras objetivo
     temporal.py             #   suavizado adaptativo (1 pasada) + bilateral centrado (2 pasadas)
-    pipeline.py             #   orquestación: compositing por regiones, 1/2 pasadas, preview, ETA
+    pipeline.py             #   orquestación AGNÓSTICA AL MOTOR (habla con BaseFaceSwapper): 1/2 pasadas, ETA, RAM
   utils/                    #   system (GPU/RAM/ffmpeg), video (ffmpeg), image (máscaras/paste), logging
   ui/interface.py           #   UI Gradio (modo Videos musicales, controles de ojos/boca/máscara)
 scripts/                    # setup.sh/.bat, check_env.py, download_models.py
@@ -57,6 +61,10 @@ models/                     # .onnx descargados (ignorado por git salvo .gitkeep
 ```
 
 ## Convenciones / decisiones clave
+- **Dos motores tras `BaseFaceSwapper`** (`fuser/engines/`): el `pipeline` llama a la interfaz, nunca
+  a una implementación. InsightFace es el motor por defecto; **FaceFusion es opcional** (si no está
+  instalado, `FaceFusionSwapper.load()` lanza `FaceFusionNotAvailable` con instrucciones). No metas
+  dependencia dura de `facefusion` en `requirements.txt`.
 - **Todo ONNX vía onnxruntime** (sin PyTorch/basicsr): instalación ligera y robusta.
 - **Imports perezosos**: `onnxruntime`/`insightface` se importan dentro de funciones/métodos para que
   la UI arranque sin ellos (clave para probar la UI). No los subas a nivel de módulo.
