@@ -41,10 +41,11 @@ Si no aparece CUDA: revisar driver NVIDIA y **emparejar `onnxruntime-gpu` con la
 (ver `INSTALL.md` §3). **Nunca** tener `onnxruntime` y `onnxruntime-gpu` instalados a la vez.
 
 ## Kit offline (pendrive)
-Si el usuario trae modelos/FaceFusion en un pendrive, **pídele la ruta de la carpeta `modelos`** y
-coloca: `fuser_models/*.onnx → models/`, `insightface/buffalo_l → models/models/buffalo_l/`,
-`facefusion → vendor/facefusion/`. Detalle en `INSTALL.md` → "Instalar desde un pendrive". La ruta del
-pendrive **la tiene que indicar el usuario** (cambia por máquina).
+Normalmente el usuario trae **solo `facefusion/`** en el pendrive (lo pesado): **pídele la ruta** y copia
+`facefusion → vendor/facefusion/`. Los `.onnx` de Fuser y `buffalo_l` se bajan solos con
+`python scripts/download_models.py` (o en el primer uso). Si el usuario tampoco tendrá internet, también
+puede traer `fuser_models/*.onnx → models/` e `insightface/buffalo_l → models/models/buffalo_l/`.
+Detalle en `PENDRIVE.md`. La ruta del pendrive la indica el usuario (cambia por máquina).
 
 ## Arquitectura (resumen)
 ```

@@ -166,38 +166,31 @@ python app.py --port 7861
 
 ---
 
-## 📦 Instalar desde un pendrive (kit offline)
+## 📦 Instalar desde un pendrive
 
-Si descargaste los modelos y FaceFusion en otra PC y los trajiste en un pendrive (la carpeta `modelos`),
-**no hace falta volver a bajar nada**. ⚠️ **Importante: tenés que indicarle a Claude Code (o copiar a mano)
-DÓNDE está guardada esa carpeta**, porque la ruta del pendrive cambia en cada PC.
+En el pendrive **solo hace falta llevar `facefusion/`** (la carpeta pesada). Los `.onnx` de Fuser y el
+detector `buffalo_l` **la app los descarga sola** al instalar. ⚠️ **Indicá la ruta real del pendrive**
+(cambia en cada PC). Guía completa en **[`PENDRIVE.md`](PENDRIVE.md)**.
 
-La carpeta del kit tiene esta forma y cada parte va a un sitio del repo:
+| Del pendrive | Va a | ¿Necesario? |
+|---|---|---|
+| `facefusion/` | `fuser/vendor/facefusion/` | ✅ sí (es la pesada) |
+| `fuser_models/*.onnx` | `fuser/models/` | ❌ se descarga sola |
+| `insightface/buffalo_l/` | `fuser/models/models/buffalo_l/` | ❌ se descarga sola |
 
-```
-modelos/
-├── fuser_models/*.onnx        →  fuser/models/
-├── insightface/buffalo_l/     →  fuser/models/models/buffalo_l/
-└── facefusion/                →  fuser/vendor/facefusion/
-```
-
-**Colocación a mano** (Linux/macOS; en Windows usa copia equivalente y reemplaza `<KIT>` por tu ruta real,
-p. ej. `D:\modelos` o `/media/usb/modelos`):
+**A mano** (Linux/macOS; `KIT` = ruta real del pendrive):
 ```bash
-KIT=<KIT>                         # ⚠️ pon aquí la ruta real del pendrive
-cp "$KIT"/fuser_models/*.onnx models/
-mkdir -p models/models && cp -r "$KIT"/insightface/buffalo_l models/models/
+bash scripts/setup.sh --no-facefusion              # crea venv, instala deps y BAJA SOLO los modelos + buffalo_l
 mkdir -p vendor && cp -r "$KIT"/facefusion vendor/facefusion
-python scripts/check_env.py       # debe mostrar modelos "descargado" + FaceFusion "disponible"
+python scripts/check_env.py                         # modelos "descargado" + FaceFusion "disponible"
 ```
 
 ### Prompt para Claude Code (instalar desde el pendrive)
-> Instala esta app en local **sin descargar de internet** lo que ya traigo en un pendrive.
-> **La carpeta del kit está en: `<RUTA_REAL_DEL_PENDRIVE>/modelos`** ← (reemplaza por la ruta real;
-> si no la sabes, búscala o pregúntame).
-> Pasos: 1) crea `.venv` e instala `requirements.txt`; 2) copia `fuser_models/*.onnx` a `models/`;
-> 3) copia `insightface/buffalo_l` a `models/models/buffalo_l`; 4) copia `facefusion` a `vendor/facefusion`;
-> 5) corre `python scripts/check_env.py` y arregla lo que falte (CUDA incluido); 6) lanza `python app.py`.
+> Instala esta app en local. Traigo **FaceFusion** en un pendrive; el resto que se **descargue solo**.
+> La carpeta del pendrive está en: `<RUTA_REAL>` (reemplaza por la ruta real; si no la sabes, búscala).
+> Pasos: 1) crea `.venv` e instala `requirements.txt`; 2) copia `<RUTA_REAL>/facefusion` a `vendor/facefusion`;
+> 3) corre `python scripts/download_models.py` (baja solos los .onnx de Fuser + buffalo_l);
+> 4) corre `python scripts/check_env.py` y arregla lo que falte (CUDA incluido); 5) lanza `python app.py`.
 > No hagas commits.
 
 ---
@@ -273,8 +266,8 @@ En la PC con la GPU, clona el repo, abre **Claude Code** dentro de la carpeta `f
 > 6) lanza `python app.py` y dime la URL.
 > Opcional (máxima calidad): instala el motor FaceFusion con `bash scripts/install_facefusion.sh` y
 > verifica con `python scripts/check_env.py` que aparezca "FaceFusion — disponible".
-> Si traigo los modelos/FaceFusion en un **pendrive**, te indico la ruta (p. ej. `/media/usb/modelos`)
-> y los copias a su sitio según `INSTALL.md` → "Instalar desde un pendrive", en vez de descargarlos.
+> Si traigo **FaceFusion** en un **pendrive**, te indico la ruta y copias `facefusion` a `vendor/facefusion`
+> (el resto se descarga solo con `download_models.py`). Ver `PENDRIVE.md`.
 > No subas nada a git ni hagas commits.
 
 Claude Code tiene todo el contexto en `CLAUDE.md` para resolver los detalles (CUDA, modelos, troubleshooting).
