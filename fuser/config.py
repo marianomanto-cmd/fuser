@@ -382,8 +382,18 @@ FF_PIXEL_BOOST_CHOICES = [
     ("512x512 (máxima calidad, más VRAM)", "512x512"),
 ]
 
-# Config de memoria POR MOTOR (reactiva): FaceFusion (más pesado y lento) recibe
-# buffers y tramos de 2 pasadas mayores y prefiere 2 pasadas por defecto.
+# Perfil de memoria recomendado POR MOTOR (vista de alto nivel, legible).
+#   ram_buffer_gb       : RAM objetivo para el buffer de frames.
+#   two_pass            : preferencia de 2 pasadas por defecto.
+#   max_temporal_frames : ventana mínima recomendada para el suavizado temporal.
+MEMORY_PROFILES: Dict[str, dict] = {
+    ENGINE_INSIGHTFACE: {"ram_buffer_gb": 4, "two_pass": False, "max_temporal_frames": 8},
+    ENGINE_FACEFUSION: {"ram_buffer_gb": 8, "two_pass": True, "max_temporal_frames": 12},
+}
+
+# Config fina de memoria POR MOTOR (multiplicadores que aplica el memory_manager
+# sobre el perfil de RAM elegido por el usuario): FaceFusion recibe buffers y
+# tramos de 2 pasadas mayores y prefiere 2 pasadas por defecto.
 ENGINE_MEMORY_CONFIG: Dict[str, dict] = {
     ENGINE_INSIGHTFACE: dict(
         buffer_mult=1.0, buffer_cap_mult=1.0, chunk_mult=1.0, chunk_cap_mult=1.0,

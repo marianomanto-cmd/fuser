@@ -102,7 +102,21 @@ class SwapPipeline:
         return int(round(w * f)), int(round(h * f))
 
     def _use_two_pass(self) -> bool:
-        return bool(self.settings.two_pass_temporal and self.engine.supports_two_pass())
+        """El **pipeline** decide 1 vs 2 pasadas consultando al motor + la RAM.
+
+        - Si el motor no las soporta → 1 pasada.
+        - Si el usuario las activó → 2 pasadas.
+        - FaceFusion + Modo Videos Musicales → se **fuerzan** 2 pasadas si hay RAM
+          suficiente (prioriza calidad), aunque el usuario no las marcara.
+        """
+        if not self.engine.supports_two_pass():
+            return False
+        if self.settings.two_pass_temporal:
+            return True
+        music = self.settings.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        if music and self.engine.prefers_two_pass():
+            return bool(self.mm.get_recommended_mode()["two_pass"])
+        return False
 
     # ----- previsualización ----------------------------------------------------
     def preview(
@@ -138,6 +152,15 @@ class SwapPipeline:
         ensure_dirs()
         info = videoutil.probe(video_path)
         out_w, out_h = self._output_dims(info.width, info.height)
+
+        # El pipeline decide el flujo consultando las capacidades del motor.
+        caps = self.engine.get_capabilities()
+        music = self.settings.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        region_enh = bool(caps.get("region_enhancement") and music and self.settings.mouth_enhancer)
+        log.info(
+            "Flujo: motor=%s · 2 pasadas=%s · realce localizado de boca=%s",
+            self.settings.engine, self._use_two_pass(), region_enh,
+        )
         stamp = int(time.time())
         tmp_video = TEMP_DIR / f"fuser_tmp_{stamp}.mp4"
         final_out = Path(output_path) if output_path else OUTPUTS_DIR / f"fuser_{stamp}.mp4"

@@ -124,6 +124,13 @@ class BaseFaceSwapper(ABC):
         """Alias semántico de ``get_memory_usage`` (contrato de la interfaz)."""
         return self.get_memory_usage()
 
+    def get_recommended_memory_profile(self) -> dict:
+        """Modo de memoria recomendado para este motor (delegado al memory_manager)."""
+        try:
+            return self.mm.get_recommended_mode()
+        except Exception:
+            return {}
+
     def cleanup(self) -> None:
         """Libera los recursos del motor (modelos/sesiones)."""
         self.unload()

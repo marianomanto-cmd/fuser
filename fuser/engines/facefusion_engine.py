@@ -62,7 +62,31 @@ class FaceFusionSwapper(BaseFaceSwapper):
         self._source_face = None
         self._analyser = None    # detector InsightFace para el post-procesado por regiones
         self._mouth_enh = None   # enhancer (CodeFormer) para el paso localizado de boca
+        self._mar_ema = None     # baseline dinámico del MAR (neutral por persona)
         self._loaded = False
+
+    def reset_temporal(self) -> None:
+        self._mar_ema = None
+
+    def _dynamic_openness(self, face, frame, mouth_mask) -> float:
+        """Apertura de boca con **umbral dinámico** (baseline por persona).
+
+        Usa el MAR (distancia vértice superior↔inferior de la boca / ancho) y lo
+        compara con un baseline EMA del propio sujeto (su boca 'neutral'), en vez
+        de un umbral fijo. Así detecta mejor 'boca abierta' en personas con bocas
+        distintas. Cae al contraste local si no hay 106 landmarks.
+        """
+        from ..utils import image as imageutil
+
+        mar = imageutil.mouth_aspect_ratio(face.kps, getattr(face, "landmark_2d_106", None))
+        if mar is None:
+            return imageutil._region_contrast(frame, mouth_mask)
+        if self._mar_ema is None:
+            self._mar_ema = mar
+        else:
+            self._mar_ema += 0.04 * (mar - self._mar_ema)
+        floor = float(np.clip(self._mar_ema, 0.15, 0.30))  # umbral dinámico
+        return float(np.clip((mar - floor) / 0.33, 0.0, 1.0))
 
     # ----- post-procesado por regiones (calidad de boca/dientes/ojos) ---------
     def _mouth_open_boost(self) -> float:
@@ -151,9 +175,8 @@ class FaceFusionSwapper(BaseFaceSwapper):
         boost = self._mouth_open_boost()
         for f in faces:
             kps = f.kps
-            lmk = getattr(f, "landmark_2d_106", None)
             _, mouth_mask = imageutil.frame_eye_mouth_masks(kps, out.shape, boost)
-            openness = imageutil.mouth_openness(kps, lmk, out, mouth_mask)
+            openness = self._dynamic_openness(f, out, mouth_mask)
             profile = float(np.clip((abs(self._yaw(f)) - 20.0) / 50.0, 0.0, 1.0))
 
             mouth_amt = s.mouth_detail * (0.5 + 0.9 * openness)  # dientes solo si abierta

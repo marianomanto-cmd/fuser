@@ -21,6 +21,7 @@ from typing import List
 from ..config import (
     ENGINE_FACEFUSION,
     ENGINE_MEMORY_CONFIG,
+    MEMORY_PROFILES,
     RAM_BALANCED,
     RAM_FRACTIONS,
     Settings,
@@ -201,6 +202,22 @@ class MemoryManager:
         if not self.default_two_pass():
             return False
         return self.two_pass_chunk(frame_shape) >= 120
+
+    def get_recommended_mode(self, frame_shape=(1080, 1920)) -> dict:
+        """Modo recomendado que el **pipeline** consulta para decidir el flujo.
+
+        Combina el perfil de memoria del motor (``MEMORY_PROFILES``) con la RAM
+        real disponible: decide 1 vs 2 pasadas y dimensiona buffer y ventana
+        temporal. Así el pipeline no necesita conocer los detalles del motor.
+        """
+        profile = MEMORY_PROFILES.get(self.settings.engine, MEMORY_PROFILES[next(iter(MEMORY_PROFILES))])
+        return {
+            "engine": self.settings.engine,
+            "two_pass": self.recommend_two_pass(frame_shape),
+            "ram_buffer_frames": self.ram_buffer_size(frame_shape),
+            "temporal_window_frames": self.temporal_window_frames(frame_shape),
+            "profile": profile,
+        }
 
     def metrics(self, frame_shape=(1080, 1920)) -> dict:
         """Métricas de memoria (VRAM/RAM/buffers) para la UI y los logs."""
