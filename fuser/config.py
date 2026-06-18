@@ -204,7 +204,28 @@ ENHANCER_MODELS: Dict[str, ModelInfo] = {
     ),
 }
 
-MODEL_REGISTRY: Dict[str, ModelInfo] = {**SWAPPER_MODELS, **ENHANCER_MODELS}
+# --- Face parsing (segmentación de regiones faciales) ------------------------
+# Modelo opcional. Si está presente, habilita máscaras por región de máxima
+# precisión (piel/ojos/cejas/nariz/boca/labios), clave para perfiles y boca.
+PARSER_MODELS: Dict[str, ModelInfo] = {
+    "face_parser_bisenet": ModelInfo(
+        key="face_parser_bisenet",
+        label="BiSeNet face parsing",
+        filename="face_parsing_bisenet.onnx",
+        urls=[
+            "https://huggingface.co/facefusion/models-3.0.0/resolve/main/face_parser.onnx",
+            "https://github.com/facefusion/facefusion-assets/releases/download/models/face_parser.onnx",
+        ],
+        kind="parser",
+        size=512,
+    ),
+}
+
+MODEL_REGISTRY: Dict[str, ModelInfo] = {
+    **SWAPPER_MODELS,
+    **ENHANCER_MODELS,
+    **PARSER_MODELS,
+}
 
 # Etiquetas para los dropdowns de la UI.
 SWAPPER_CHOICES = [(m.label, k) for k, m in SWAPPER_MODELS.items()]
@@ -230,6 +251,70 @@ FACE_SELECTOR_LABELS: Dict[str, str] = {
 
 
 # ----------------------------------------------------------------------------
+# Máscara de fusión (cómo se recorta la cara al pegarla)
+# ----------------------------------------------------------------------------
+MASK_HULL = "hull"        # casco convexo de los 106 landmarks (sigue el rostro)
+MASK_ELLIPSE = "ellipse"  # elipse a partir de los 5 kps (fallback robusto)
+MASK_BOX = "box"          # rectángulo suavizado (v1, el más simple)
+MASK_PARSING = "parsing"  # segmentación facial (BiSeNet) — máxima precisión
+
+MASK_MODE_LABELS: Dict[str, str] = {
+    "Contorno facial (recomendado, ideal perfiles)": MASK_HULL,
+    "Segmentación BiSeNet (máxima precisión)": MASK_PARSING,
+    "Elipse (rápida y robusta)": MASK_ELLIPSE,
+    "Rectángulo (básico)": MASK_BOX,
+}
+
+
+# ----------------------------------------------------------------------------
+# Modo de expresión / caso de uso
+# ----------------------------------------------------------------------------
+EXPR_STANDARD = "standard"
+EXPR_MUSIC_VIDEO = "music_video"
+EXPR_HIGH_EXPRESSION = "high_expression"
+
+EXPRESSION_MODE_LABELS: Dict[str, str] = {
+    "Estándar": EXPR_STANDARD,
+    "🎤 Videos musicales (caras cantando)": EXPR_MUSIC_VIDEO,
+    "😮 Alta expresión (boca/ojos extremos)": EXPR_HIGH_EXPRESSION,
+}
+
+# Valores recomendados que la UI aplica al elegir un modo de expresión.
+# Pensados para el caso de uso musical: ojos vivos, dientes nítidos al cantar,
+# buen comportamiento en perfiles y mucho movimiento de cabeza.
+EXPRESSION_PRESETS: Dict[str, dict] = {
+    EXPR_STANDARD: dict(
+        enhancer_model="gfpgan_1.4", enhancer_blend=0.8,
+        mask_mode=MASK_HULL, eye_preservation=0.35, mouth_detail=0.35,
+        color_match=False, temporal_smoothing=True, temporal_alpha=0.55,
+        motion_adaptive=True, two_pass_temporal=False, reference_count=1,
+    ),
+    EXPR_MUSIC_VIDEO: dict(
+        # CodeFormer preserva mejor dientes y textura de piel.
+        enhancer_model="codeformer", enhancer_blend=0.85, codeformer_fidelity=0.75,
+        mask_mode=MASK_HULL, eye_preservation=0.7, mouth_detail=0.75,
+        color_match=True,            # iluminación cambiante de los escenarios
+        temporal_smoothing=True, temporal_alpha=0.45,
+        motion_adaptive=True,        # nada de "lag" en la boca al cantar
+        two_pass_temporal=True,      # estabilidad sin lag (usa RAM)
+        reference_count=5,           # varios ángulos/expresiones
+    ),
+    EXPR_HIGH_EXPRESSION: dict(
+        enhancer_model="codeformer", enhancer_blend=0.85, codeformer_fidelity=0.8,
+        mask_mode=MASK_HULL, eye_preservation=0.8, mouth_detail=0.85,
+        color_match=True, temporal_smoothing=True, temporal_alpha=0.4,
+        motion_adaptive=True, two_pass_temporal=True, reference_count=5,
+    ),
+}
+
+# Opciones para el selector de cantidad de referencias.
+REFERENCE_COUNT_CHOICES = [
+    ("Auto (todas las que subas)", 0), ("1 imagen", 1),
+    ("3 imágenes", 3), ("5 imágenes", 5), ("8 imágenes", 8),
+]
+
+
+# ----------------------------------------------------------------------------
 # Settings del pipeline
 # ----------------------------------------------------------------------------
 @dataclass
@@ -248,21 +333,35 @@ class Settings:
     reference_distance: float = 1.2         # umbral de distancia para "reference"
     source_average: bool = True             # promediar embeddings de varias fuentes
 
+    # --- Multi-referencia (varias fotos de origen) ---
+    reference_count: int = 0                # 0 = usar todas; si >0 elige las mejores N
+    multi_ref_min_sim: float = 0.15         # rechazo de outliers (cos sim al promedio)
+    frontal_weighting: bool = True          # pondera más las referencias frontales
+
+    # --- Caso de uso / expresión ---
+    expression_mode: str = EXPR_STANDARD
+
     # --- Calidad del swap ---
     face_opacity: float = 1.0               # 1=swap total, <1 deja ver el original
+    mask_mode: str = MASK_HULL              # tipo de máscara de fusión
     mask_blur: float = 0.25                 # suavizado del borde de la máscara (0..1)
     mask_padding: float = 0.0               # recorte interior de la máscara (0..1)
+    eye_preservation: float = 0.4           # realce/nitidez localizado en los ojos
+    mouth_detail: float = 0.4               # realce localizado en boca/dientes
     color_match: bool = False               # transferencia de color al original
     processing_resolution: int = 0          # 0 = nativa; si >0 limita el lado mayor
 
     # --- Estabilidad temporal ---
     temporal_smoothing: bool = True
     temporal_alpha: float = 0.55            # EMA de landmarks (0=sin memoria,1=congela)
+    motion_adaptive: bool = True            # menos suavizado cuando hay movimiento rápido
+    two_pass_temporal: bool = False         # 2 pasadas (estabilidad sin lag, usa RAM)
 
     # --- Memoria ---
     memory_mode: str = MODE_BALANCED
     gpu_mem_limit_gb: float = 0.0           # 0 = usar el del preset
     force_cpu: bool = False                 # forzar ejecución solo en CPU
+    ram_boost: bool = True                  # dimensiona buffers según la RAM libre
 
     # --- Salida ---
     keep_audio: bool = True

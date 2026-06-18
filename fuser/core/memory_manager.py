@@ -107,11 +107,47 @@ class MemoryManager:
     def det_size(self) -> int:
         return int(self.settings.det_size)
 
+    def buffer_sizes(self, frame_shape) -> tuple:
+        """Tamaño de las colas de RAM (prefetch, escritura).
+
+        Con ``ram_boost`` se dimensionan según la **RAM libre real**: se reserva
+        ~30% de la RAM disponible para los buffers de frames (repartida entre las
+        dos colas). Así, en una máquina con 40 GB, la GPU casi nunca espera por el
+        disco. Nunca baja del valor del preset y tiene un tope de seguridad.
+        """
+        base_pf, base_wq = self.prefetch_frames, self.writer_queue
+        if not self.settings.ram_boost or not self.info.ram_available_gb:
+            return base_pf, base_wq
+        h, w = frame_shape[:2]
+        frame_mb = (h * w * 3) / (1024 ** 2)
+        if frame_mb <= 0:
+            return base_pf, base_wq
+        budget_mb = self.info.ram_available_gb * 1024 * 0.30
+        n = int(budget_mb / frame_mb / 2)
+        n = max(base_pf, min(n, 800))
+        return n, n
+
+    def two_pass_chunk(self, frame_shape) -> int:
+        """Nº de frames que cabe procesar por tramo en modo 2 pasadas (acota RAM).
+
+        El modo de 2 pasadas guarda un tramo de frames en RAM para suavizar los
+        landmarks con ventana centrada. El tamaño del tramo se ajusta a la RAM
+        libre (~45%), con límites prudentes.
+        """
+        if not self.info.ram_available_gb:
+            return 300
+        h, w = frame_shape[:2]
+        frame_mb = max((h * w * 3) / (1024 ** 2), 0.1)
+        budget_mb = self.info.ram_available_gb * 1024 * 0.45
+        n = int(budget_mb / frame_mb)
+        return max(60, min(n, 4000))
+
     def summary(self) -> str:
         dev = "GPU (CUDA)" if self.use_gpu else "CPU"
         enh = "CPU/RAM" if self.enhancer_providers() == self._cpu_providers() else dev
+        boost = "ON" if self.settings.ram_boost else "OFF"
         return (
             f"Cómputo: {dev} | Enhancer: {enh} | "
             f"Límite VRAM/sesión: {self.settings.gpu_mem_limit_gb:.1f} GB | "
-            f"det_size: {self.det_size} | prefetch: {self.prefetch_frames} frames"
+            f"det_size: {self.det_size} | RAM-boost: {boost}"
         )

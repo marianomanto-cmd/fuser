@@ -73,5 +73,22 @@ class FaceAnalyser:
         """Similitud coseno entre embeddings normalizados (1 = idénticos)."""
         return float(np.dot(emb_a, emb_b))
 
+    @staticmethod
+    def estimate_yaw(face) -> float:
+        """Estima el yaw (giro horizontal) en grados aproximados a partir de los kps.
+
+        Proxy barato: desplazamiento horizontal de la nariz respecto al centro de
+        los ojos, normalizado por la distancia interocular. ~0° = frontal; el
+        signo indica el lado. Suficiente para ponderar referencias frontales.
+        """
+        try:
+            kps = np.asarray(face.kps, dtype=np.float32)
+            eye_c = (kps[0] + kps[1]) / 2.0
+            inter = float(np.linalg.norm(kps[1] - kps[0])) + 1e-3
+            offset = (kps[2][0] - eye_c[0]) / inter
+            return float(np.clip(offset * 90.0, -90.0, 90.0))
+        except Exception:
+            return 0.0
+
     def unload(self) -> None:
         self._app = None

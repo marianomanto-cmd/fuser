@@ -28,7 +28,8 @@ usarla en tu máquina.
 
 ## 📑 Tabla de contenidos
 1. [Investigación: ¿qué backend y por qué?](#-investigación-qué-backend-y-por-qué)
-2. [Cómo aprovecha los 8 GB VRAM + 40 GB RAM](#-cómo-aprovecha-los-8-gb-vram--40-gb-ram)
+2. [🎤 Optimización para videos musicales](#-optimización-para-videos-musicales-v11)
+3. [Cómo aprovecha los 8 GB VRAM + 40 GB RAM](#-cómo-aprovecha-los-8-gb-vram--40-gb-ram)
 3. [Características](#-características)
 4. [Requisitos de hardware](#-requisitos-de-hardware)
 5. [Instalación (local con GPU)](#-instalación-local-con-gpu)
@@ -87,6 +88,52 @@ En resumen: **mejor relación calidad/VRAM/usabilidad** para 8 GB es el stack **
 
 ---
 
+## 🎤 Optimización para videos musicales (v1.1)
+
+Fuser está afinado para el caso exigente de **caras de mujeres cantando en videos
+musicales**: múltiples ángulos (frontal/3-4/perfil), **boca muy abierta**,
+expresiones intensas y mucho movimiento de cabeza.
+
+### Problemas de la v1.0 (y cómo se corrigen)
+
+| Problema v1.0 | Causa | Solución v1.1 |
+|---|---|---|
+| **Ojos "muertos"/planos** | El swap a 128 px tiene ojos minúsculos; el enhancer los aplana | **Realce dirigido de ojos** (región derivada de los kps) que devuelve nitidez y vida sin tocar el resto |
+| **Dientes borrosos al cantar** | Boca abierta a 128 px = pocos píxeles; el enhancer alucina dientes | **Detalle de boca** localizado + región de boca **alargada** para boca abierta + CodeFormer (mejor en dientes) |
+| **Deformación en perfiles** (mandíbula/oreja/nariz) | La máscara **rectangular** pegaba piel sobre oreja/pelo/fondo | **Máscara de contorno** (casco convexo de los 106 landmarks) que **sigue la cara real**; opción de **segmentación BiSeNet** |
+| **"Lag"/fantasmas en la boca** | El suavizado temporal EMA arrastra los movimientos rápidos | **Suavizado adaptativo al movimiento**: responde al instante cuando hay movimiento, suaviza solo el temblor |
+| **Identidad inestable con la cabeza en movimiento** | Una sola foto de referencia | **Multi-referencia robusta**: varias fotos, ponderadas por frontalidad y con rechazo de outliers |
+
+> Medido en pruebas sintéticas del repo: la máscara de contorno **elimina** el
+> sangrado del swap fuera de la cara (R≈98 vs 219 del rectángulo en la esquina del
+> recuadro), y el suavizado adaptativo reacciona **~2.4× más rápido** a la boca que
+> el EMA clásico, reduciendo a la vez el temblor de los landmarks ~25×.
+
+### Controles específicos
+- **🎤 Modo "Videos musicales"**: con un clic activa CodeFormer, máscara de contorno,
+  preservación alta de ojos/boca, color match, suavizado adaptativo, **2 pasadas** y
+  recomienda **5 referencias**.
+- **👁️ Preservación de ojos** y **👄 Detalle de boca/dientes**: sliders dedicados.
+- **Tipo de máscara**: contorno (recomendado) · segmentación BiSeNet · elipse · rectángulo.
+- **Nº de referencias**: 1 / 3 / 5 / 8 / auto.
+
+### Cómo subir buenas referencias (lo más importante)
+Sube **3–5 fotos de la MISMA persona** que cubran lo que aparece en el vídeo:
+- **Ángulos**: frontal, 3/4 **y** perfil.
+- **Expresiones**: boca cerrada **y** abierta/sonriendo (para que los dientes salgan bien).
+- **Calidad**: nítidas, bien iluminadas, sin gafas de sol, sin manos/micrófono tapando la cara,
+  sin filtros agresivos.
+- Más ángulos = más consistencia con la cabeza en movimiento. **No cuesta VRAM extra**
+  (los embeddings se promedian en un único vector de identidad).
+
+### Flujo recomendado para un videoclip
+1. Modo **🎤 Videos musicales**. 2. Sube **5 fotos** variadas + el vídeo.
+3. **Previsualiza** 6 frames (incluye uno con boca abierta y uno de perfil).
+4. Afina **Preservación de ojos** / **Detalle de boca** y, si hay bordes, *Suavizado del borde*.
+5. Activa **2 pasadas** si te sobra RAM. 6. **Procesa** y descarga.
+
+---
+
 ## 🧠 Cómo aprovecha los 8 GB VRAM + 40 GB RAM
 
 La idea central: **la VRAM es escasa pero suficiente para los modelos; la RAM es abundante y se usa
@@ -99,6 +146,12 @@ como buffer elástico para que la GPU nunca espere por el disco.**
   de GPU. Los **buffers de frames viven en RAM** (decenas/cientos de frames según el modo).
 - **Backpressure acotado:** las colas tienen tamaño máximo (`prefetch_frames`, `writer_queue`) para
   usar mucha RAM **pero de forma controlada**, sin desbordarla.
+- **Dimensionado dinámico por RAM (`ram_boost`):** los buffers se ajustan a la **RAM libre real**
+  (reservando ~30%), de modo que en una máquina con 40 GB la GPU casi nunca espera por el disco.
+- **2 pasadas por tramos en RAM (`two_pass_temporal`):** opción de máxima estabilidad. Carga un
+  **tramo de frames en RAM** (tamaño calculado según la RAM libre), suaviza los landmarks con una
+  **ventana centrada** (no causal → sin lag) y luego renderiza. Aprovecha la RAM para una calidad
+  temporal imposible en una sola pasada. **No aumenta la VRAM** (los modelos siguen siendo los mismos).
 - **Techo de VRAM por sesión** (`gpu_mem_limit`): cada modelo ONNX tiene un límite de arena, evitando
   que uno acapare la tarjeta. `arena_extend_strategy=kSameAsRequested` y
   `cudnn_conv_algo_search=HEURISTIC` minimizan los picos de VRAM.
@@ -113,11 +166,16 @@ como buffer elástico para que la GPU nunca espere por el disco.**
 ## ✨ Características
 
 - ✅ **Solo face swap de vídeo** (sin distracciones).
-- ✅ Imagen(es) **fuente** (una o varias, con **promediado de embeddings**) + **vídeo** objetivo.
+- ✅ **Modo "🎤 Videos musicales"** que activa la mejor configuración para caras cantando.
+- ✅ **Multi-referencia robusta**: varias fotos (ángulos/expresiones), ponderadas por frontalidad
+  y con **rechazo de outliers**, en un único vector de identidad (no cuesta VRAM).
 - ✅ **Una o varias caras**: a todas, a la más grande, por **referencia** (una persona) o por índice.
 - ✅ **Selector de enhancer** (GFPGAN, CodeFormer, GPEN, RestoreFormer++) con **control de fuerza**.
+- ✅ **Preservación dirigida de ojos y boca/dientes** (sliders dedicados).
+- ✅ **Máscara que sigue el contorno** (casco de landmarks) o **segmentación BiSeNet** → perfiles limpios.
+- ✅ **Estabilidad temporal**: suavizado **adaptativo al movimiento** (sin lag) y **2 pasadas** (usa RAM).
 - ✅ **Calidad**: resolución de procesamiento, **fuerza del swap (opacidad)**, máscara (suavizado y
-  recorte), **igualar color** y **suavizado temporal** (anti-jitter).
+  recorte) e **igualar color** (iluminación cambiante).
 - ✅ **Previsualización de frames clave** antes de procesar todo el vídeo.
 - ✅ **Barra de progreso real + FPS + ETA**.
 - ✅ **Descarga** del vídeo resultado (con audio original re-multiplexado).
@@ -215,6 +273,9 @@ para validar la interfaz y el flujo:
 - **Límite de VRAM por sesión (GB):** `0 = automático` (usa el del modo). Súbelo/bájalo manualmente
   para afinar.
 - **Forzar CPU:** todo en CPU (sin GPU). Muy lento; solo para probar.
+- **Usar más RAM (`ram_boost`):** dimensiona los buffers según la RAM libre (ideal con 40 GB).
+- **2 pasadas (`two_pass_temporal`):** máxima estabilidad temporal usando la RAM; ideal para
+  videoclips con cabeza en movimiento. No aumenta la VRAM.
 - **Resolución de procesamiento:** *Nativa* = máxima calidad; baja a 1080p/720p para ahorrar
   memoria/tiempo en vídeos grandes.
 
@@ -237,14 +298,15 @@ fuser/
     ├── config.py              # Settings, presets de memoria, registro de modelos
     ├── models/                # Envoltorios ONNX
     │   ├── downloader.py       # Descarga perezosa, verificable y con fallback manual
-    │   ├── face_analyser.py    # InsightFace buffalo_l (detección + embeddings)
+    │   ├── face_analyser.py    # InsightFace buffalo_l (detección + embeddings + yaw)
     │   ├── face_swapper.py     # InSwapper (inswapper_128)
-    │   └── face_enhancer.py    # GFPGAN / CodeFormer / GPEN / RestoreFormer++ (ONNX)
+    │   ├── face_enhancer.py    # GFPGAN / CodeFormer / GPEN / RestoreFormer++ (ONNX)
+    │   └── face_parser.py      # Segmentación BiSeNet (máscaras por región, opcional)
     ├── core/                  # Lógica optimizada
-    │   ├── memory_manager.py   # VRAM/RAM, execution providers, offloading
-    │   ├── face_store.py       # Caras fuente + selección de objetivos
-    │   ├── temporal.py         # Suavizado temporal (anti-jitter)
-    │   └── pipeline.py         # Orquestación (productor/consumidor, preview, ETA)
+    │   ├── memory_manager.py   # VRAM/RAM, providers, offloading, buffers por RAM
+    │   ├── face_store.py       # Multi-referencia robusta + selección de objetivos
+    │   ├── temporal.py         # Suavizado adaptativo + 2 pasadas (bilateral centrado)
+    │   └── pipeline.py         # Orquestación (1/2 pasadas, compositing por regiones, ETA)
     ├── utils/
     │   ├── system.py           # Detección de GPU/VRAM/RAM/FFmpeg
     │   ├── video.py            # Lectura/escritura de vídeo + audio (FFmpeg)
