@@ -1,0 +1,29 @@
+# ============================================================================
+# Fuser — dependencias para uso LOCAL con GPU NVIDIA (CUDA).
+#
+# IMPORTANTE: usa onnxruntime-gpu (NO instales también 'onnxruntime' a secas,
+# los dos juntos entran en conflicto). Para CPU / Hugging Face Spaces usa
+# 'requirements-cpu.txt'.
+#
+# Necesitas drivers NVIDIA + CUDA compatibles con onnxruntime-gpu.
+# (onnxruntime-gpu 1.17+ -> CUDA 11.8 / 12.x según la build; ver README).
+# ============================================================================
+
+# --- Interfaz ---
+gradio>=5.0,<6
+
+# --- Núcleo numérico / imagen / vídeo ---
+numpy>=1.24,<2
+opencv-python-headless>=4.9.0
+pillow>=10.0.0
+imageio-ffmpeg>=0.5.1          # trae un binario de FFmpeg -> sin instalación manual
+
+# --- Inferencia ONNX (GPU) ---
+onnx>=1.15.0
+onnxruntime-gpu>=1.17.0
+insightface>=0.7.3             # detección (SCRFD) + embeddings (ArcFace) + InSwapper
+
+# --- Utilidades ---
+psutil>=5.9.0
+tqdm>=4.66.0
+pynvml>=11.5.0                 # opcional: lectura de VRAM para el panel de estado

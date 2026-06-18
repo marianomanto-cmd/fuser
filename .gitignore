@@ -1,0 +1,52 @@
+# ==== Fuser / Python ====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.installed.cfg
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Modelos descargados (pesados, se bajan en el primer uso).
+# OJO: ancla con '/' para ignorar SOLO la carpeta raíz 'models/' y NO el
+# paquete de código 'fuser/models/'.
+/models/*
+!/models/.gitkeep
+
+# Cache de InsightFace
+.insightface/
+
+# Salidas y temporales
+outputs/
+tmp/
+temp/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+!assets/**/*.mp4
+
+# Logs
+*.log
+
+# Gradio
+gradio_cached_examples/
+flagged/
+.gradio/
+
+# Sistema operativo / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

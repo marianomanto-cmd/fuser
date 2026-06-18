@@ -1,0 +1,3 @@
+# Los modelos ONNX se descargan aquí automáticamente en el primer uso.
+# Esta carpeta se mantiene en el repositorio; su contenido (los .onnx) está
+# ignorado por .gitignore.

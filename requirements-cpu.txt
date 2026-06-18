@@ -1,0 +1,21 @@
+# ============================================================================
+# Fuser — dependencias para CPU / Hugging Face Spaces (testing de la UI).
+#
+# Misma app pero con onnxruntime de CPU. Sirve para probar la interfaz y el
+# flujo completo sin GPU (el procesamiento será lento; ideal solo para validar
+# la UI antes de usarla en la máquina local con 8 GB de VRAM).
+# ============================================================================
+
+gradio>=5.0,<6
+
+numpy>=1.24,<2
+opencv-python-headless>=4.9.0
+pillow>=10.0.0
+imageio-ffmpeg>=0.5.1
+
+onnx>=1.15.0
+onnxruntime>=1.17.0           # versión CPU
+insightface>=0.7.3
+
+psutil>=5.9.0
+tqdm>=4.66.0
