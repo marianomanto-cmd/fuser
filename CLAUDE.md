@@ -13,12 +13,15 @@ musicales** (múltiples ángulos, boca abierta, perfiles, mucho movimiento).
 
 ## Comandos
 ```bash
-# Instalación (crea .venv, instala, baja modelos, diagnostica)
-bash scripts/setup.sh            # Linux/macOS  (--cpu para versión CPU)
+# Docker (todo incluido: CUDA + ambos motores + modelos)
+docker compose up --build        # http://localhost:7860
+
+# Instalación nativa (crea .venv, instala, baja modelos, instala FaceFusion, diagnostica)
+bash scripts/setup.sh            # Linux/macOS  (--cpu = CPU; --no-facefusion = sin FaceFusion)
 scripts\setup.bat                # Windows
 
-# Motor opcional FaceFusion (alta calidad) — clona en vendor/facefusion
-bash scripts/install_facefusion.sh   # Windows: scripts\install_facefusion.bat
+# Motor FaceFusion (alta calidad) — se auto-instala al elegir el toggle; o a mano:
+python scripts/install_facefusion.py     # clona en vendor/facefusion + instala deps
 
 # Manual
 python -m venv .venv && source .venv/bin/activate

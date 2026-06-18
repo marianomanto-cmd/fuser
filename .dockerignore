@@ -1,0 +1,26 @@
+# Lo que NO debe entrar en la imagen Docker.
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+*.pyc
+# Modelos y vendor se generan dentro de la imagen en el build.
+models/*
+!models/.gitkeep
+vendor/
+# Salidas y temporales del host.
+outputs/
+tmp/
+temp/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+# Docs/artefactos no necesarios en runtime.
+*.log
+.idea/
+.vscode/
+.DS_Store

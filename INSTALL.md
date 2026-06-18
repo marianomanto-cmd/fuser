@@ -3,7 +3,35 @@
 Guía para instalar y correr Fuser **en tu PC** (objetivo: **8 GB de VRAM NVIDIA + 40 GB de RAM**).
 Pensada para hacerlo a mano **o con ayuda de Claude Code** (ver el [prompt listo para pegar](#-instalar-con-claude-code) al final).
 
-> TL;DR (Linux/macOS): `bash scripts/setup.sh` · (Windows): `scripts\setup.bat` → luego `python app.py`.
+> TL;DR:
+> - **Docker (todo incluido):** `docker compose up --build` → http://localhost:7860
+> - **Nativo (Linux/macOS):** `bash scripts/setup.sh` → `python app.py` (Windows: `scripts\setup.bat`)
+>
+> En ambos, los **dos motores** y los modelos quedan listos; en la UI eliges con el **toggle
+> "🧠 Motor de Face Swap"** entre InsightFace (rápido) y FaceFusion (alta calidad).
+
+---
+
+## 🐳 Opción rápida: Docker (todo en una caja)
+
+La forma con **menos pasos**: la imagen incluye CUDA, **ambos motores** (InsightFace + FaceFusion) y
+los modelos. En la otra PC solo necesitas:
+
+1. **Driver NVIDIA** reciente + **NVIDIA Container Toolkit** (para pasar la GPU al contenedor):
+   ```bash
+   # Ubuntu (ejemplo): instalar el toolkit y reiniciar Docker
+   # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+   ```
+2. Construir y arrancar:
+   ```bash
+   git clone https://github.com/marianomanto-cmd/fuser.git
+   cd fuser
+   docker compose up --build        # http://localhost:7860
+   ```
+   (sin compose:  `docker build -t fuser . && docker run --gpus all -p 7860:7860 -v "$PWD/outputs:/app/outputs" fuser`)
+
+Los vídeos resultantes quedan en `./outputs`. Si tu Docker no acepta la clave `deploy.devices` del
+compose, usa el `docker run --gpus all ...` de arriba.
 
 ---
 
@@ -141,12 +169,16 @@ python app.py --port 7861
 ## ➕ Motor opcional: FaceFusion (Alta Calidad)
 
 El motor **FaceFusion** mejora **boca abierta, dientes y perfiles**, a cambio de **más VRAM y tiempo**.
-Es **opcional**: sin él, Fuser funciona perfectamente con InsightFace.
 
-### Instalación automática (recomendada)
+**Normalmente no tienes que hacer nada:** Docker y `scripts/setup.sh` ya lo instalan, y si lo activas
+en el **toggle** de la UI y aún no está, Fuser lo **auto-instala la primera vez** (lo clona en
+`vendor/facefusion` e instala sus dependencias). Las siguientes veces es instantáneo.
+
+### Instalarlo a mano (si lo saltaste)
 ```bash
 # con el .venv de Fuser ACTIVO:
-bash scripts/install_facefusion.sh      # Windows: scripts\install_facefusion.bat
+python scripts/install_facefusion.py    # cross-platform
+# o:  bash scripts/install_facefusion.sh   (Windows: scripts\install_facefusion.bat)
 ```
 Clona FaceFusion en `vendor/facefusion` (Fuser lo **auto-detecta** ahí), instala sus dependencias en
 el mismo entorno y **restaura los pines de Fuser** (gradio 5, numpy<2).

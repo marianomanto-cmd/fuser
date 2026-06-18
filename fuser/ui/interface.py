@@ -226,12 +226,13 @@ def build_interface() -> gr.Blocks:
                 system_md = gr.Markdown(format_system_summary())
                 refresh_btn = gr.Button("🔄 Actualizar estado del sistema", size="sm")
 
-        # ----- Motor de face swap -------------------------------------------
+        # ----- Motor de face swap (toggle) ----------------------------------
         with gr.Row():
-            engine = gr.Dropdown(
+            engine = gr.Radio(
                 choices=list(config.ENGINE_LABELS.items()),
                 value=config.ENGINE_INSIGHTFACE,
                 label="🧠 Motor de Face Swap",
+                info="Cambia entre rápido (InsightFace) y alta calidad (FaceFusion).",
             )
         gr.Markdown(config.ENGINE_INFO_MD)
 

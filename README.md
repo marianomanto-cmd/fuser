@@ -115,9 +115,10 @@ descargue partes a RAM cuando la VRAM esté al límite. Las **2 pasadas** (suavi
 RAM) están disponibles con **InsightFace**; con FaceFusion se aprovecha su propia consistencia + los
 buffers de RAM de Fuser.
 
-**Instalar FaceFusion (opcional):** `bash scripts/install_facefusion.sh` (Windows:
-`scripts\install_facefusion.bat`) — clona FaceFusion en `vendor/facefusion` (auto-detectado) e instala
-sus dependencias. Detalles en [`INSTALL.md`](INSTALL.md#-motor-opcional-facefusion-alta-calidad).
+**FaceFusion se instala solo:** con Docker o `scripts/setup.sh` ya queda listo; y si lo activas en el
+**toggle** y aún no está, Fuser lo **auto-instala la primera vez** (lo clona en `vendor/facefusion` e
+instala sus dependencias, sin que toques nada). También manual: `python scripts/install_facefusion.py`.
+Detalles en [`INSTALL.md`](INSTALL.md#-motor-opcional-facefusion-alta-calidad).
 
 ---
 
@@ -243,7 +244,20 @@ como buffer elástico para que la GPU nunca espere por el disco.**
 > notas de Windows y un **prompt listo para instalar con Claude Code**). Contexto para asistentes en
 > [`CLAUDE.md`](CLAUDE.md).
 
-**Instalación en un comando** (crea `.venv`, instala, baja modelos y diagnostica):
+> 🎯 **Objetivo: instalas una vez y en la UI eliges el motor con un toggle (InsightFace ↔ FaceFusion).**
+> Ambos motores y los modelos quedan listos en la instalación; no tienes que clonar nada más.
+
+**Opción A · Docker (todo en una caja, recomendado).** Solo necesitas Docker + NVIDIA Container Toolkit:
+
+```bash
+git clone https://github.com/marianomanto-cmd/fuser.git
+cd fuser
+docker compose up --build          # abre http://localhost:7860
+```
+La imagen incluye CUDA, **ambos motores (InsightFace + FaceFusion)** y los modelos.
+
+**Opción B · Nativo, en un comando** (crea `.venv`, instala dependencias, **el motor FaceFusion**,
+baja modelos y diagnostica):
 
 ```bash
 git clone https://github.com/marianomanto-cmd/fuser.git
@@ -251,6 +265,9 @@ cd fuser
 bash scripts/setup.sh        # Linux/macOS   (Windows: scripts\setup.bat)
 python app.py                # abre http://127.0.0.1:7860
 ```
+
+En cualquiera de las dos: abre la UI y usa el **toggle "🧠 Motor de Face Swap"** para elegir
+**InsightFace (Rápido)** o **FaceFusion (Alta Calidad)**. Listo.
 
 **Instalación manual:**
 
@@ -348,11 +365,15 @@ fuser/
 ├── README.md
 ├── INSTALL.md                 # Guía de instalación local (CUDA, Windows, Claude Code)
 ├── CLAUDE.md                  # Contexto del proyecto para Claude Code
+├── Dockerfile                 # Imagen con CUDA + ambos motores + modelos
+├── docker-compose.yml         # `docker compose up` con GPU
+├── .dockerignore
 ├── .gitignore
 ├── LICENSE
 ├── scripts/
-│   ├── setup.sh / setup.bat               # Instalación automática (Linux/macOS · Windows)
-│   ├── install_facefusion.sh / .bat       # Instala el motor opcional FaceFusion
+│   ├── setup.sh / setup.bat               # Instalación automática (instala FaceFusion incluido)
+│   ├── install_facefusion.py              # Auto-instalador de FaceFusion (cross-platform)
+│   ├── install_facefusion.sh / .bat       # Wrappers del anterior
 │   ├── check_env.py                        # Doctor de entorno (GPU/RAM/modelos/motores)
 │   └── download_models.py                  # Pre-descarga de modelos
 ├── models/                    # Modelos ONNX (auto-descarga; ignorado por git)

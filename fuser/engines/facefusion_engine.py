@@ -41,43 +41,14 @@ _VRAM_STRATEGY = {
 }
 
 
-class FaceFusionNotAvailable(RuntimeError):
-    def __init__(self, detail: str = ""):
-        super().__init__(
-            "FaceFusion no está disponible.\n"
-            "Instálalo para usar el motor de alta calidad:\n"
-            "    pip install facefusion\n"
-            "  (o clónalo y añádelo al PYTHONPATH).\n"
-            f"{('Detalle: ' + detail) if detail else ''}\n"
-            "Mientras tanto puedes usar el motor 'InsightFace (Rápido)'."
-        )
-
-
-def _ensure_on_path() -> None:
-    """Si FaceFusion está clonado en ``vendor/facefusion``, lo añade a sys.path.
-
-    Así basta con clonar FaceFusion ahí (lo hace ``scripts/install_facefusion``)
-    para que Fuser lo encuentre, sin tocar PYTHONPATH ni instalarlo como paquete.
-    """
-    import sys
-
-    from ..config import PROJECT_ROOT
-
-    candidate = PROJECT_ROOT / "vendor" / "facefusion"
-    if candidate.exists():
-        path = str(candidate)
-        if path not in sys.path:
-            sys.path.insert(0, path)
-
-
-def is_available() -> bool:
-    """True si los módulos internos de FaceFusion se pueden importar."""
-    _ensure_on_path()
-    try:
-        importlib.import_module("facefusion")
-        return True
-    except Exception:
-        return False
+# Detección, auto-instalación y error viven en facefusion_bootstrap (reexportados
+# aquí para compatibilidad: otros módulos importan is_available desde este motor).
+from .facefusion_bootstrap import (  # noqa: E402
+    FaceFusionNotAvailable,
+    ensure,
+    ensure_on_path,
+    is_available,
+)
 
 
 class FaceFusionSwapper(BaseFaceSwapper):
@@ -95,7 +66,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def _import(self):
         if self._modules:
             return self._modules
-        _ensure_on_path()
+        ensure_on_path()
         try:
             state_manager = importlib.import_module("facefusion.state_manager")
             # Analizador de caras (la ruta cambió entre versiones).
@@ -194,8 +165,10 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def load(self, progress=None) -> None:
         if self._loaded:
             return
+        # Auto-instala FaceFusion la primera vez (sin pasos manuales).
+        ensure(progress, auto=getattr(self.settings, "ff_auto_install", True))
         if progress:
-            progress(0.1, "Importando FaceFusion…")
+            progress(0.2, "Importando FaceFusion…")
         self._import()
         self._configure()
         if progress:

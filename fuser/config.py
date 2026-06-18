@@ -331,7 +331,7 @@ ENGINE_INFO_MD = (
     "incluye el compositing por regiones de Fuser (ojos/boca/contorno) y el modo de 2 pasadas.  \n"
     "- **FaceFusion (Alta Calidad):** mejor en **boca abierta, dientes y perfiles laterales** "
     "(usa *pixel boost* y máscaras de oclusión/región), pero es **más lento y usa más VRAM**. "
-    "Requiere FaceFusion instalado (`pip install facefusion`)."
+    "Se **instala solo la primera vez** que lo eliges (o durante `setup`); no tienes que clonar nada."
 )
 
 # Opciones específicas de FaceFusion expuestas en la UI.
@@ -359,6 +359,7 @@ class Settings:
     engine: str = ENGINE_INSIGHTFACE
     ff_swapper_model: str = "inswapper_128"  # solo FaceFusion
     ff_pixel_boost: str = "256x256"          # solo FaceFusion (resolución del swap)
+    ff_auto_install: bool = True             # auto-instalar FaceFusion al usarlo
 
     # --- Modelos ---
     swapper_model: str = "inswapper_128"

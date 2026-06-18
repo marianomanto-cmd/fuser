@@ -1,0 +1,32 @@
+# ============================================================================
+# Fuser — orquestación Docker con GPU.
+#
+#   docker compose up --build          # construye y arranca (http://localhost:7860)
+#
+# Requiere en la máquina anfitriona:
+#   - Driver NVIDIA reciente
+#   - NVIDIA Container Toolkit  (para pasar la GPU al contenedor)
+#
+# Si tu Docker no soporta la clave 'deploy.devices', usa en su lugar:
+#   docker run --gpus all -p 7860:7860 -v "$PWD/outputs:/app/outputs" fuser:latest
+# ============================================================================
+services:
+  fuser:
+    build: .
+    image: fuser:latest
+    container_name: fuser
+    ports:
+      - "7860:7860"
+    volumes:
+      # Resultados accesibles desde el host.
+      - ./outputs:/app/outputs
+      # (Opcional) persistir/forzar modelos desde el host en vez de los de la imagen:
+      # - ./models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
