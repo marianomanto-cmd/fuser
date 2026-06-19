@@ -273,36 +273,56 @@ class SwapPipeline:
         if self.mm.is_facefusion:
             time_sigma += 0.5  # mejor calidad base -> tolera suavizado más fuerte
         log.info("2 pasadas · tramo de %d frames en RAM · time_sigma=%.1f", chunk, time_sigma)
-        processed = 0
         start = time.time()
         proc_res = self.settings.processing_resolution
 
+        # Progreso MONÓTONO con ETA real combinando las dos fases (análisis +
+        # render). El render es bastante más caro que el análisis, así que pesa
+        # más: frac = (detectados*0.2 + renderizados*0.8) / total. Así la barra
+        # nunca retrocede y la ETA se autocorrige entre fases.
+        detected = 0
+        rendered = 0
+        det_w, ren_w = 0.2, 0.8
+
+        def emit(phase: str = "render") -> None:
+            if not progress:
+                return
+            frac = min((detected * det_w + rendered * ren_w) / total, 0.99)
+            elapsed = time.time() - start
+            remaining = elapsed * (1.0 - frac) / frac if frac > 0.01 else 0.0
+            if phase == "detect":
+                progress(frac, f"Analizando movimiento · {detected}/{total} · "
+                               f"ETA {format_eta(remaining)}")
+            else:
+                fps = rendered / elapsed if elapsed > 0 else 0.0
+                progress(frac, f"Procesando · frame {rendered}/{total} · {fps:.1f} fps · "
+                               f"ETA {format_eta(remaining)}")
+
         def flush(frames, faces_per_frame):
-            nonlocal processed
+            nonlocal rendered
             apply_two_pass_smoothing(
                 faces_per_frame, time_sigma=time_sigma, motion_adaptive=self.settings.motion_adaptive
             )
             for fr, faces in zip(frames, faces_per_frame):
                 targets = self.engine.select_targets(faces)
                 writer.write(self.engine.render(fr, targets))
-                processed += 1
-                self._emit_progress(progress, processed, total, start, prefix="Render · ")
+                rendered += 1
+                emit()
 
         frames: list = []
         faces_per_frame: list = []
-        seen = 0
         for frame in videoutil.read_frames(video_path):
             work, _ = imageutil.limit_resolution(frame, proc_res)
             faces = self.engine.detect(work)
             frames.append(work)
             faces_per_frame.append(faces)
-            seen += 1
-            if progress and seen % 15 == 0:
-                progress(min(seen / total, 0.49) * 0.5, f"Analizando movimiento · {seen}/{total}")
+            detected += 1
+            if detected % 10 == 0:
+                emit("detect")
             if len(frames) >= chunk:
                 flush(frames, faces_per_frame)
                 frames, faces_per_frame = [], []
 
         if frames:
             flush(frames, faces_per_frame)
-        return processed
+        return rendered
