@@ -23,7 +23,8 @@ log = get_logger(__name__)
 
 @dataclass
 class SystemInfo:
-    has_cuda: bool
+    has_cuda: bool                # True si hay aceleración GPU (CUDA o DirectML)
+    gpu_provider: Optional[str]   # EP de GPU: CUDAExecutionProvider / DmlExecutionProvider / None
     providers: List[str]
     gpu_name: Optional[str]
     vram_total_gb: Optional[float]
@@ -98,11 +99,18 @@ def ffmpeg_path() -> Optional[str]:
 def get_system_info() -> SystemInfo:
     """Recopila un retrato del sistema (cacheado)."""
     providers = available_providers()
-    cuda = "CUDAExecutionProvider" in providers
-    nvml = _query_nvml() if cuda else None
+    has_cuda_ep = "CUDAExecutionProvider" in providers
+    has_dml_ep = "DmlExecutionProvider" in providers
+    gpu_provider = (
+        "CUDAExecutionProvider" if has_cuda_ep
+        else "DmlExecutionProvider" if has_dml_ep
+        else None
+    )
+    nvml = _query_nvml() if gpu_provider else None
     ram_total, ram_avail = _query_ram()
     return SystemInfo(
-        has_cuda=cuda,
+        has_cuda=gpu_provider is not None,
+        gpu_provider=gpu_provider,
         providers=providers,
         gpu_name=(nvml or {}).get("name"),
         vram_total_gb=(nvml or {}).get("total_gb"),
@@ -119,7 +127,8 @@ def format_system_summary() -> str:
     info = get_system_info()
     lines = ["### 🖥️ Estado del sistema", ""]
     if info.has_cuda:
-        gpu = info.gpu_name or "GPU CUDA"
+        backend = "DirectML" if info.gpu_provider == "DmlExecutionProvider" else "CUDA"
+        gpu = info.gpu_name or f"GPU ({backend})"
         vram = (
             f"{info.vram_free_gb:.1f} GB libres / {info.vram_total_gb:.1f} GB"
             if info.vram_total_gb
@@ -127,9 +136,9 @@ def format_system_summary() -> str:
         )
         lines.append(f"- **GPU:** {gpu}")
         lines.append(f"- **VRAM:** {vram}")
-        lines.append("- **Aceleración:** ✅ CUDA")
+        lines.append(f"- **Aceleración:** ✅ {backend}")
     else:
-        lines.append("- **GPU:** ❌ Sin CUDA — se usará **CPU** (lento, solo para probar la UI)")
+        lines.append("- **GPU:** ❌ Sin aceleración GPU — se usará **CPU** (lento, solo para probar la UI)")
 
     if info.ram_total_gb:
         lines.append(

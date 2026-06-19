@@ -61,7 +61,16 @@ class MemoryManager:
 
     def _gpu_providers(self) -> List:
         # CPU como fallback automático si una op no cabe/!soporta en GPU.
+        if self.info.gpu_provider == "DmlExecutionProvider":
+            # DirectML (DirectX 12): no acepta las opciones específicas de CUDA.
+            return [("DmlExecutionProvider", {"device_id": "0"}), "CPUExecutionProvider"]
         return [("CUDAExecutionProvider", self._cuda_options()), "CPUExecutionProvider"]
+
+    def facefusion_provider(self) -> str:
+        """Nombre del execution provider para FaceFusion ('cuda'/'directml'/'cpu')."""
+        if not self.use_gpu:
+            return "cpu"
+        return "directml" if self.info.gpu_provider == "DmlExecutionProvider" else "cuda"
 
     def _cpu_providers(self) -> List:
         return ["CPUExecutionProvider"]
@@ -266,7 +275,8 @@ class MemoryManager:
         return "\n".join(lines)
 
     def summary(self) -> str:
-        dev = "GPU (CUDA)" if self.use_gpu else "CPU"
+        backend = "DirectML" if self.info.gpu_provider == "DmlExecutionProvider" else "CUDA"
+        dev = f"GPU ({backend})" if self.use_gpu else "CPU"
         enh = "CPU/RAM" if self.enhancer_providers() == self._cpu_providers() else dev
         return (
             f"Cómputo: {dev} | Enhancer: {enh} | "

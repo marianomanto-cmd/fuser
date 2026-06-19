@@ -274,12 +274,49 @@ class FaceFusionSwapper(BaseFaceSwapper):
                 except Exception:
                     continue
 
+    def _init_ff_defaults(self) -> None:
+        """Puebla el ``state_manager`` de FaceFusion con TODOS sus defaults (igual
+        que hace su CLI), para que los items que el adaptador no setea no queden en
+        ``None`` (lo que rompe el detector/landmarker/máscaras en FaceFusion 3.x).
+
+        FaceFusion asume CWD = su repo para descubrir procesadores, así que lo
+        fijamos temporalmente a ``vendor/facefusion`` solo durante la inicialización.
+        """
+        import os
+        import sys
+
+        from .facefusion_bootstrap import vendor_dir
+
+        try:
+            from facefusion import args as ff_args
+            from facefusion import program as ff_program
+            from facefusion import state_manager as ff_state
+        except Exception as exc:  # pragma: no cover
+            log.warning("No pude importar program/args de FaceFusion: %s", exc)
+            return
+
+        old_argv, old_cwd = sys.argv, os.getcwd()
+        sys.argv = ["facefusion"]
+        try:
+            os.chdir(str(vendor_dir()))
+            prog = ff_program.create_program()
+            parsed = prog.parse_args(["headless-run"])
+            ff_args.apply_args(vars(parsed), ff_state.init_item)
+            log.info("Defaults de FaceFusion inicializados.")
+        except SystemExit:  # pragma: no cover
+            log.warning("FaceFusion program salió al parsear; sigo con overrides.")
+        except Exception as exc:  # pragma: no cover
+            log.warning("No pude inicializar defaults de FaceFusion: %s", exc)
+        finally:
+            sys.argv = old_argv
+            os.chdir(old_cwd)
+
     # ----- configuración (integra con memory_manager + modo musical) ----------
     def _configure(self) -> None:
         s = self.settings
         music = s.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
 
-        providers = ["cuda"] if self.mm.use_gpu else ["cpu"]
+        providers = [self.mm.facefusion_provider()]
         # Ejecución / memoria
         self._set("execution_providers", providers)
         self._set("execution_device_id", "0")
@@ -339,6 +376,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         if progress:
             progress(0.2, "Importando FaceFusion…")
         self._import()
+        self._init_ff_defaults()
         self._configure()
         if progress:
             progress(0.5, "Descargando/preparando modelos de FaceFusion…")
@@ -373,18 +411,32 @@ class FaceFusionSwapper(BaseFaceSwapper):
             self.load()
         fa = self._modules["face_analyser"]
         get_average = getattr(fa, "get_average_face", None)
+        get_many = getattr(fa, "get_many_faces", None)
         if get_average is None:
             raise FaceFusionNotAvailable("face_analyser.get_average_face no encontrado")
-        try:
-            self._source_face = get_average(images)
-        except TypeError:
-            # Algunas versiones esperan (frames, position).
-            self._source_face = get_average(images, 0)
+        # FaceFusion 3.x: get_average_face espera CARAS ya detectadas (no imágenes).
+        # Detectamos primero con el detector de FaceFusion y luego promediamos.
+        if get_many is not None:
+            faces = []
+            for img in images:
+                try:
+                    faces.extend(get_many([img]) or [])
+                except Exception as exc:  # pragma: no cover
+                    log.warning("FaceFusion get_many_faces falló: %s", exc)
+            n_used = len(faces)
+            self._source_face = get_average(faces) if faces else None
+        else:
+            # Compatibilidad con APIs antiguas (get_average_face aceptaba imágenes).
+            try:
+                self._source_face = get_average(images)
+            except TypeError:
+                self._source_face = get_average(images, 0)
+            n_used = len(images)
         if self._source_face is None:
             raise ValueError("FaceFusion no detectó ninguna cara en las imágenes fuente.")
         from ..core.face_store import SourceStats
 
-        return SourceStats(n_input=len(images), n_used=len(images), mean_yaw=0.0, rejected=0)
+        return SourceStats(n_input=len(images), n_used=n_used, mean_yaw=0.0, rejected=0)
 
     # ----- procesamiento -------------------------------------------------------
     def _run_module(self, mod, inputs: dict) -> Optional[np.ndarray]:
