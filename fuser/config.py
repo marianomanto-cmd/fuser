@@ -320,7 +320,17 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         # Modo musical inteligente: recomienda FaceFusion (alta calidad), muchas
         # referencias, post-procesado agresivo de boca/dientes y 2 pasadas (RAM).
         engine="facefusion",
-        enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.75,
+        # Mayor calidad one-shot: ghost_3 (256 px) en vez de inswapper (128 px).
+        # Medido como el mejor en identidad de forma consistente (agent_tests), a 256
+        # px nativos; CodeFormer pone la nitidez final. Sin entrenar nada. ¿Identidad
+        # rara con TU cara? Probá hififace/simswap con "🔬 Comparar modelos".
+        ff_swapper_model="ghost_3_256", ff_pixel_boost="256x256",
+        enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.5,
+        ff_enhancer_weight=0.5,      # CodeFormer nativo hacia "detalle" -> dientes nítidos
+        ff_detector_angles=(0, 90, 270),  # recupera caras inclinadas / cabeza atrás
+        ff_detector_score=0.3,       # +recall en pitch extremo (mentón arriba)
+        ff_landmarker_score=0.2,     # no descarta landmarks en cabeza-atrás (evita salto de máscara)
+        ff_temporal_fallback=True,   # mantiene el realce aunque se pierda la detección unos frames
         mask_mode=MASK_HULL,
         eye_preservation=0.8,        # ojos vivos
         mouth_detail=0.9,            # dientes nítidos al cantar
@@ -333,7 +343,11 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
     ),
     EXPR_HIGH_EXPRESSION: dict(
         engine="facefusion",
-        enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.8,
+        ff_swapper_model="ghost_3_256", ff_pixel_boost="256x256",
+        enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.5,
+        ff_enhancer_weight=0.5,
+        ff_detector_angles=(0, 90, 180, 270),  # máxima recuperación de ángulos
+        ff_detector_score=0.3, ff_landmarker_score=0.2, ff_temporal_fallback=True,
         mask_mode=MASK_HULL, eye_preservation=0.85, mouth_detail=0.95,
         color_match=True, temporal_smoothing=True, temporal_alpha=0.4,
         motion_adaptive=True, two_pass_temporal=True, reference_count=6,
@@ -369,13 +383,54 @@ ENGINE_INFO_MD = (
     "Se **instala solo la primera vez** que lo eliges (o durante `setup`); no tienes que clonar nada."
 )
 
-# Opciones específicas de FaceFusion expuestas en la UI.
+# Modelos de swap disponibles en FaceFusion 3.1.1 (TODOS verificados como presentes
+# en vendor/facefusion/.assets/models; todos ONNX, corren en DirectML). El swapper
+# es la mayor palanca de calidad one-shot: inswapper_128 es la base (128 px), el
+# resto son modelos de 256/512 px con mucho mejor identidad y detalle, SIN entrenar
+# nada. Orden por idoneidad para el caso musical (caras cantando):
+#   hififace  -> mejor identidad/forma de cara (recomendado, default del modo musical)
+#   simswap   -> expresiones/boca más naturales
+#   ghost     -> identidad + detalle (ghost_3 el más nuevo)
+#   simswap_512 -> máxima resolución (más lento/VRAM)
+#   inswapper -> base rápida/compatible
+# (hyperswap NO existe en FaceFusion 3.1.1 -> se eliminó para no romper el motor.)
+# Orden por idoneidad MEDIDA en agent_tests (cos sim ArcFace a la fuente + revisión
+# visual, sobre clips reales de canto/primer plano): ghost_3 gana en identidad de
+# forma consistente Y es 256 px; inswapper iguala identidad pero solo 128 px;
+# hififace fue inconsistente; simswap suaviza expresiones. Ver agent_tests/RESULTADOS.md.
 FF_SWAPPER_CHOICES = [
-    ("inswapper_128 (estándar)", "inswapper_128"),
+    ("ghost_3_256 (mejor identidad + detalle — recomendado)", "ghost_3_256"),
+    ("hififace_256 (forma de cara, alternativa)", "hififace_unofficial_256"),
+    ("simswap_256 (expresiones/boca más suaves)", "simswap_256"),
+    ("ghost_2_256 (identidad + detalle)", "ghost_2_256"),
+    ("simswap_512 (máxima resolución, más lento)", "simswap_unofficial_512"),
+    ("uniface_256", "uniface_256"),
+    ("blendswap_256", "blendswap_256"),
+    ("inswapper_128 (rápido, base 128 px)", "inswapper_128"),
     ("inswapper_128_fp16 (menos VRAM)", "inswapper_128_fp16"),
-    ("hyperswap_1a_256 (mayor resolución)", "hyperswap_1a_256"),
-    ("hyperswap_1b_256", "hyperswap_1b_256"),
 ]
+
+FF_SWAPPER_LABELS = {k: lbl for lbl, k in FF_SWAPPER_CHOICES}
+
+
+def short_model(key: str) -> str:
+    """Nombre corto y legible de un modelo de swap (para galerías/etiquetas)."""
+    return {
+        "hififace_unofficial_256": "hififace", "simswap_unofficial_512": "simswap_512",
+        "ghost_3_256": "ghost_3", "ghost_2_256": "ghost_2", "ghost_1_256": "ghost_1",
+        "simswap_256": "simswap", "inswapper_128": "inswapper",
+        "inswapper_128_fp16": "inswapper_fp16", "uniface_256": "uniface",
+        "blendswap_256": "blendswap",
+    }.get(key, key)
+
+# Resolución NATIVA mínima por modelo: FaceFusion rechaza un pixel-boost menor que
+# la resolución a la que se entrenó el modelo. inswapper admite 128; el resto exige
+# >=256 (y simswap_512 exige 512). El motor usa esto para no pasarse ni quedarse corto.
+FF_SWAPPER_NATIVE_RES = {
+    "inswapper_128": 128,
+    "inswapper_128_fp16": 128,
+    "simswap_unofficial_512": 512,
+}  # el resto (hififace/ghost/simswap_256/uniface/blendswap) -> 256
 FF_PIXEL_BOOST_CHOICES = [
     ("128x128 (rápido, menos VRAM)", "128x128"),
     ("256x256 (recomendado)", "256x256"),
@@ -418,6 +473,13 @@ class Settings:
     ff_swapper_model: str = "inswapper_128"  # solo FaceFusion
     ff_pixel_boost: str = "256x256"          # solo FaceFusion (resolución del swap)
     ff_auto_install: bool = True             # auto-instalar FaceFusion al usarlo
+    # FaceFusion: detección robusta para cabeza atrás / ángulos extremos.
+    ff_detector_angles: tuple = (0,)         # rotaciones del detector (+ángulos = +recall en caras inclinadas)
+    ff_detector_score: float = 0.5           # umbral de confianza del detector (bajo = +recall en pitch extremo)
+    ff_landmarker_score: float = 0.5         # umbral de landmarks (bajo = no descarta la cara en cabeza-atrás)
+    # FaceFusion: nitidez del enhancer nativo (CodeFormer). 0 = detalle/nítido, 1 = fiel a la entrada (borrosa).
+    ff_enhancer_weight: float = 0.8
+    ff_temporal_fallback: bool = True        # rellena huecos de detección reusando los últimos kps (anti-salto)
 
     # --- Modelos ---
     swapper_model: str = "inswapper_128"
@@ -446,6 +508,7 @@ class Settings:
     mask_padding: float = 0.0               # recorte interior de la máscara (0..1)
     eye_preservation: float = 0.4           # realce/nitidez localizado en los ojos
     mouth_detail: float = 0.4               # realce localizado en boca/dientes
+    skin_detail: float = 0.35               # reinyecta textura de piel del original (anti-plástico)
     mouth_enhancer: bool = True             # 2.º paso de enhancer (CodeFormer) en boca abierta
     mouth_enhancement_strength: float = 1.0  # multiplicador del enhancer localizado de boca
     use_mouth_pixel_boost: bool = True       # pase localizado de boca a 512 (FaceFusion)

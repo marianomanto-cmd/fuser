@@ -14,6 +14,8 @@ Gradio + CSS custom (ver ``CUSTOM_CSS``), sin tocar la lógica ni el wiring.
 """
 from __future__ import annotations
 
+from collections import deque
+from pathlib import Path
 from typing import List, Optional
 
 import cv2
@@ -29,6 +31,10 @@ from ..utils.system import format_system_summary
 log = get_logger(__name__)
 
 _PIPELINE_CACHE: dict = {"pipeline": None, "signature": None}
+
+# Intentos por video en la cola: si falla, se manda al FINAL y se reintenta luego;
+# tras este nº de intentos se descarta (evita un bucle infinito con un video imposible).
+QUEUE_MAX_ATTEMPTS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +55,7 @@ def _build_settings(
     temporal_smoothing, temporal_alpha, motion_adaptive, two_pass_temporal,
     memory_mode, gpu_mem_limit, force_cpu, ram_mode,
     keep_audio, keep_fps, output_quality,
+    skin_detail,
 ) -> config.Settings:
     return config.Settings(
         engine=engine,
@@ -86,6 +93,7 @@ def _build_settings(
         keep_audio=bool(keep_audio),
         keep_fps=bool(keep_fps),
         output_quality=int(output_quality),
+        skin_detail=float(skin_detail),
     )
 
 
@@ -145,6 +153,8 @@ def _apply_expression_mode(mode: str):
     eng = preset.get("engine", config.ENGINE_INSIGHTFACE)
     return (
         eng,
+        preset.get("ff_swapper_model", "inswapper_128"),
+        preset.get("ff_pixel_boost", "256x256"),
         preset["enhancer_model"],
         preset["enhancer_blend"],
         preset.get("codeformer_fidelity", 0.7),
@@ -165,10 +175,11 @@ def _recommendation(mode: str, engine: str) -> str:
     """Recomendación automática según el modo y el motor elegidos (para la UI)."""
     tips = {
         config.EXPR_MUSIC_VIDEO: (
-            "🎤 **Videos musicales** — ✅ **Se activó FaceFusion** + **post-procesado agresivo de "
-            "boca/dientes** + **2 pasadas** + **RAM al máximo** + **6 referencias** recomendadas. "
+            "🎤 **Videos musicales** — ✅ **FaceFusion** con el modelo **ghost_3 256** (mejor "
+            "identidad y detalle que el inswapper 128 clásico) + **post-procesado agresivo de "
+            "boca/dientes** + **2 pasadas** + **RAM al máximo** + **6 referencias**. "
             "Sube **4–6 fotos** (frontal, 3/4 y perfil; con boca abierta y cerrada) y previsualiza un "
-            "frame con la boca abierta y uno de perfil."
+            "frame con la boca abierta y uno de perfil. ¿Identidad rara? Probá **🔬 Comparar modelos**."
         ),
         config.EXPR_HIGH_EXPRESSION: (
             "😮 **Alta expresión** — FaceFusion + realce fuerte de **boca y ojos**. Ideal para "
@@ -226,6 +237,36 @@ def _on_preview(source_files, video_path, n_preview, *control_values, progress=g
         raise gr.Error(f"Error al previsualizar: {exc}")
 
 
+def _on_compare(source_files, video_path, models, n_cmp, *control_values, progress=gr.Progress()):
+    """A/B: corre varios modelos de swap sobre los mismos frames del material del usuario."""
+    settings = _build_settings(*control_values)
+    if not source_files:
+        raise gr.Error("Subí al menos una imagen fuente (la cara a aplicar).")
+    if not video_path:
+        raise gr.Error("Subí un video objetivo.")
+    models = [m for m in (models or [])]
+    if len(models) < 2:
+        raise gr.Error("Elegí al menos 2 modelos para comparar.")
+    src_paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in source_files]
+    src_paths = [p for p in src_paths if p]
+
+    from ..core.compare import compare_models
+    try:
+        items = compare_models(
+            src_paths, video_path, models, settings, n_frames=int(n_cmp),
+            progress=lambda f, m="": progress(f, desc=m),
+        )
+    except ValueError as exc:
+        raise gr.Error(str(exc))
+    except Exception as exc:  # pragma: no cover
+        log.exception("Error en la comparación de modelos")
+        raise gr.Error(f"Error al comparar: {exc}")
+    msg = (f"✅ Comparados **{len(models)}** modelos × {int(n_cmp)} frames. Elegí a ojo el que "
+           "mejor mantenga la **identidad** y el detalle, y ponelo arriba en *Modelo de swap de "
+           "FaceFusion* (o cambiá el preset). El mejor depende de tu cara.")
+    return items, msg
+
+
 def _on_process(source_files, video_path, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
     try:
@@ -243,6 +284,151 @@ def _on_process(source_files, video_path, *control_values, progress=gr.Progress(
     except Exception as exc:  # pragma: no cover
         log.exception("Error al procesar el vídeo")
         raise gr.Error(f"Error al procesar: {exc}")
+
+
+def _queue_duration_seconds(video_path: str) -> float:
+    """Duración del video en segundos (para ordenar la cola). Los ilegibles van al final."""
+    try:
+        info = videoutil.probe(video_path)
+        return info.frame_count / (info.fps or 25.0)
+    except Exception:
+        return float("inf")
+
+
+def _on_process_queue(source_files, video_queue, *control_values, progress=gr.Progress()):
+    """Procesa una COLA de videos con el MISMO set de imágenes fuente.
+
+    - Los modelos se cargan una sola vez y se reutilizan (pipeline cacheado).
+    - La cola se ordena del video MÁS CORTO al MÁS LARGO antes de empezar.
+    - Cada resultado aparece para descargar EN CUANTO termina (no al final).
+    - Si un video falla, se manda al final y se reintenta (hasta QUEUE_MAX_ATTEMPTS).
+
+    Es un *generator*: va emitiendo (resultados, estado) tras cada video.
+    """
+    settings = _build_settings(*control_values)
+    if not source_files:
+        raise gr.Error("Sube al menos una imagen fuente (la cara a aplicar).")
+    videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (video_queue or [])]
+    videos = [v for v in videos if v]
+    if not videos:
+        raise gr.Error("Agrega al menos un video a la cola.")
+
+    progress(0.0, desc="Cargando modelos…")
+    pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.06, desc=m))
+
+    images = []
+    for f in source_files:
+        path = f if isinstance(f, str) else getattr(f, "name", None)
+        img = _read_image(path) if path else None
+        if img is not None:
+            images.append(img)
+    if not images:
+        raise gr.Error("No se pudieron leer las imágenes fuente.")
+    try:
+        stats = pipeline.prepare_source(images)
+    except ValueError as exc:
+        raise gr.Error(str(exc))
+
+    # Ordenar la cola del MÁS CORTO al MÁS LARGO: las victorias rápidas salen primero.
+    videos = sorted(videos, key=_queue_duration_seconds)
+
+    n = len(videos)
+    work = deque((v, 1) for v in videos)   # (ruta, nº de intento)
+    outputs: list = []
+    failed: list = []
+    yield outputs, f"▶️ Cola de **{n}** videos (de más corto a más largo). Procesando…"
+
+    while work:
+        vpath, attempt = work.popleft()
+        # En modo "por referencia", la referencia se toma de CADA video.
+        if pipeline.settings.face_selector == config.FACE_SELECTOR_REFERENCE:
+            info = videoutil.probe(vpath)
+            mid = videoutil.get_frames_at(vpath, [info.frame_count // 2])
+            if mid:
+                pipeline.set_reference_from_frame(mid[0], pipeline.settings.reference_face_index)
+
+        name = Path(vpath).name
+        done = len(outputs) + len(failed)
+
+        def cb(frac, msg="", _done=done, _name=name, _att=attempt):
+            overall = 0.06 + 0.94 * (_done + frac) / n
+            tag = f" (intento {_att})" if _att > 1 else ""
+            progress(overall, desc=f"[{_done + 1}/{n}] {_name}{tag} · {msg}")
+
+        try:
+            out_name = f"{len(outputs) + 1:02d}_{Path(vpath).stem}_swap.mp4"
+            out_path = str(config.OUTPUTS_DIR / out_name)
+            outputs.append(pipeline.process_video(vpath, output_path=out_path, progress=cb))
+            # Resultado disponible para descargar EN CUANTO termina este video.
+            yield outputs, f"✅ {len(outputs)}/{n} listo · acabó **{name}**. Sigo con el resto…"
+        except Exception:  # pragma: no cover
+            log.exception("Falló %s (intento %d).", vpath, attempt)
+            if attempt < QUEUE_MAX_ATTEMPTS:
+                work.append((vpath, attempt + 1))   # al FINAL de la cola, para reintentar luego
+                yield outputs, (f"⚠️ Falló **{name}**; lo mando al final de la cola para "
+                                f"reintentarlo más tarde (intento {attempt + 1}/{QUEUE_MAX_ATTEMPTS})…")
+            else:
+                failed.append(name)
+                yield outputs, f"❌ **{name}** falló {QUEUE_MAX_ATTEMPTS} veces; lo descarto. Sigo…"
+
+    if not outputs:
+        raise gr.Error("Ningún video de la cola se pudo procesar.")
+    src = f"🧬 {stats.summary()}" if stats else ""
+    tail = f" · descartados ({len(failed)}): {', '.join(failed)}" if failed else ""
+    yield outputs, (f"✅ Cola completa: **{len(outputs)}/{n}** videos listos "
+                    f"(más corto → más largo){tail}. {src}\nDescárgalos abajo.")
+
+
+def _on_split_video(video, progress=gr.Progress()):
+    """Corta un video en 5 partes IGUALES y las guarda en la carpeta ``chunks/``.
+
+    Usa FFmpeg (re-encode preciso, conserva el audio). Las partes quedan tanto
+    para descargar como en la carpeta ``chunks/`` dentro del proyecto.
+    """
+    import subprocess
+
+    from ..utils.system import ffmpeg_path
+
+    n_parts = 5
+    if not video:
+        raise gr.Error("Sube un video para cortar.")
+    vpath = video if isinstance(video, str) else getattr(video, "name", None)
+    if not vpath:
+        raise gr.Error("No se pudo leer el video.")
+    ff = ffmpeg_path()
+    if not ff:
+        raise gr.Error("FFmpeg no disponible.")
+
+    info = videoutil.probe(vpath)
+    total = info.frame_count / (info.fps or 25.0)
+    if total <= 0:
+        raise gr.Error("No se pudo determinar la duración del video.")
+    part = total / n_parts
+
+    chunks_dir = config.PROJECT_ROOT / "chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(vpath).stem
+
+    outputs: list = []
+    for i in range(n_parts):
+        progress(i / n_parts, desc=f"Cortando parte {i + 1}/{n_parts}…")
+        out = str(chunks_dir / f"{stem}_part{i + 1:02d}.mp4")
+        cmd = [ff, "-y", "-hide_banner", "-loglevel", "error",
+               "-i", vpath, "-ss", f"{i * part:.3f}"]
+        if i < n_parts - 1:                       # la última parte va hasta el final
+            cmd += ["-t", f"{part:.3f}"]
+        cmd += ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
+                "-c:a", "aac", "-movflags", "+faststart", out]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            outputs.append(out)
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or b"").decode("utf-8", "ignore")[-300:]
+            raise gr.Error(f"FFmpeg falló al cortar la parte {i + 1}: {err}")
+
+    progress(1.0, desc="Listo")
+    return outputs, (f"✅ Video cortado en **{n_parts}** partes iguales → carpeta "
+                     f"**chunks/** (`{chunks_dir}`).")
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +617,12 @@ def build_interface() -> gr.Blocks:
                     gr.Markdown("#### 🎉 Resultado")
                     output_video = gr.Video(label="Vídeo resultado")
                     output_file = gr.File(label="⬇️ Descargar resultado")
+                gr.Markdown(
+                    "🔬 *¿No sabés qué modelo usa mejor tu cara? Probá la pestaña "
+                    "**Comparar modelos** abajo.*  ·  ⏭️✂️ *Cola y cortar video: pestaña "
+                    "**Más herramientas**.*",
+                    elem_classes="fuser-soft",
+                )
 
             # --------- COLUMNA DERECHA: calidad y controles ---------
             with gr.Column(scale=1, min_width=340):
@@ -473,6 +665,12 @@ def build_interface() -> gr.Blocks:
                             info="Realza dientes/interior de la boca. Actúa más fuerte con la boca abierta.",
                         )
                     with gr.Row():
+                        skin_detail = gr.Slider(
+                            0.0, 1.0, value=0.35, step=0.05, label="🧴 Textura de piel (anti-plástico)",
+                            info="Reinyecta la textura/poros del video original sobre la cara swapeada. "
+                                 "Sube si la piel se ve cerosa/plástica; baja si aparece grano de más.",
+                        )
+                    with gr.Row():
                         mouth_enhancer = gr.Checkbox(
                             value=True, label="🦷 Enhancer localizado de boca (CodeFormer, FaceFusion)",
                             info="2.º pase de CodeFormer SOLO en la boca abierta (FaceFusion). Dientes más nítidos.",
@@ -505,9 +703,10 @@ def build_interface() -> gr.Blocks:
                     gr.Markdown(config.ENGINE_INFO_MD)
                     with gr.Row():
                         ff_swapper_model = gr.Dropdown(
-                            choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
+                            choices=config.FF_SWAPPER_CHOICES, value="ghost_3_256",
                             label="Modelo de swap de FaceFusion",
-                            info="Modelo que usa FaceFusion. hyperswap = mayor resolución.",
+                            info="El swapper es la mayor palanca de calidad. ghost_3/hififace/simswap "
+                                 "= 256 px (mejor identidad y detalle); inswapper = 128 px (rápido).",
                         )
                         ff_pixel_boost = gr.Dropdown(
                             choices=config.FF_PIXEL_BOOST_CHOICES, value="256x256",
@@ -613,6 +812,49 @@ def build_interface() -> gr.Blocks:
                     gr.Markdown("#### 🚀 Process")
                     process_btn = gr.Button("🚀 Procesar vídeo completo", variant="primary")
 
+        # ===== Pestañas secundarias: comparar modelos · herramientas =====
+        with gr.Tabs():
+            with gr.Tab("🔬 Comparar modelos"):
+                gr.Markdown(
+                    "Probá varios modelos de swap sobre **tu** cara y **tu** video, en los mismos "
+                    "frames clave. El mejor **depende de tu cara** (lo medimos: *ghost_3* suele ganar "
+                    "en identidad, pero a veces *hififace*/*simswap* quedan mejor). Usa las mismas "
+                    "**imágenes fuente** y el mismo **vídeo** de la izquierda.\n\n"
+                    "⏱️ *Cada modelo corre en su propio proceso (por cómo DirectML retiene la VRAM), "
+                    "así que tarda ~10–20 s por modelo.*"
+                )
+                cmp_models = gr.CheckboxGroup(
+                    choices=config.FF_SWAPPER_CHOICES,
+                    value=["ghost_3_256", "hififace_unofficial_256", "simswap_256", "inswapper_128"],
+                    label="Modelos a comparar (elegí 2 o más)",
+                )
+                with gr.Row():
+                    cmp_frames = gr.Slider(2, 6, value=3, step=1, label="Frames clave por modelo")
+                    cmp_btn = gr.Button("🔬 Comparar en mi material", variant="primary")
+                cmp_gallery = gr.Gallery(
+                    label="Comparación recortada a la cara (ORIGINAL · modelos)",
+                    columns=5, object_fit="contain", height=440,
+                )
+                cmp_status = gr.Markdown("", elem_classes="fuser-soft")
+            with gr.Tab("🧰 Más herramientas"):
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("#### ⏭️ Cola de trabajos (mismo set de fuentes)")
+                        video_queue = gr.Files(
+                            label="Videos cortos a procesar en cola (uno tras otro)",
+                            file_count="multiple", file_types=["video"], type="filepath",
+                        )
+                        queue_btn = gr.Button("⏭️ Procesar cola", variant="primary")
+                        queue_status = gr.Markdown("", elem_classes="fuser-soft")
+                        queue_results = gr.Files(label="⬇️ Resultados de la cola (descargar)")
+                    with gr.Column():
+                        gr.Markdown("#### ✂️ Cortar video en partes")
+                        split_video = gr.Video(label="Video a cortar")
+                        split_btn = gr.Button("✂️ Cortar en 5 partes iguales", variant="secondary")
+                        split_status = gr.Markdown("", elem_classes="fuser-soft")
+                        split_results = gr.Files(
+                            label="⬇️ Partes (también quedan en la carpeta chunks/)")
+
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
             engine, ff_swapper_model, ff_pixel_boost,
@@ -625,6 +867,7 @@ def build_interface() -> gr.Blocks:
             temporal_smoothing, temporal_alpha, motion_adaptive, two_pass_temporal,
             memory_mode, gpu_mem_limit, force_cpu, ram_mode,
             keep_audio, keep_fps, output_quality,
+            skin_detail,
         ]
 
         # ----- Wiring (sin cambios) -----------------------------------------
@@ -634,7 +877,8 @@ def build_interface() -> gr.Blocks:
             _apply_expression_mode,
             inputs=expression_mode,
             outputs=[
-                engine, enhancer_model, enhancer_blend, codeformer_fidelity, mask_mode,
+                engine, ff_swapper_model, ff_pixel_boost,
+                enhancer_model, enhancer_blend, codeformer_fidelity, mask_mode,
                 eye_preservation, mouth_detail, color_match, temporal_alpha,
                 motion_adaptive, two_pass_temporal, reference_count, ram_mode,
                 recommendation_md,
@@ -654,10 +898,25 @@ def build_interface() -> gr.Blocks:
             inputs=[source_files, target_video, n_preview, *control_inputs],
             outputs=[preview_gallery, status_md],
         )
+        cmp_btn.click(
+            _on_compare,
+            inputs=[source_files, target_video, cmp_models, cmp_frames, *control_inputs],
+            outputs=[cmp_gallery, cmp_status],
+        )
         process_btn.click(
             _on_process,
             inputs=[source_files, target_video, *control_inputs],
             outputs=[output_video, output_file, status_md],
+        )
+        queue_btn.click(
+            _on_process_queue,
+            inputs=[source_files, video_queue, *control_inputs],
+            outputs=[queue_results, queue_status],
+        )
+        split_btn.click(
+            _on_split_video,
+            inputs=[split_video],
+            outputs=[split_results, split_status],
         )
 
     return demo

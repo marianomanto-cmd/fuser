@@ -83,9 +83,12 @@ class FaceFusionSwapper(BaseFaceSwapper):
             return 0.0
         if self._mar_ema is None:
             self._mar_ema = mar
-        else:
+        elif mar < self._mar_ema:
+            # Adaptamos el baseline SOLO hacia abajo (hacia la boca neutral/cerrada).
+            # Si la cantante sostiene una nota con la boca abierta, el baseline no
+            # "persigue" la apertura y el realce de dientes no se apaga a mitad de nota.
             self._mar_ema += 0.04 * (mar - self._mar_ema)
-        floor = float(np.clip(self._mar_ema, 0.15, 0.30))  # umbral dinámico por persona
+        floor = float(np.clip(self._mar_ema, 0.12, 0.22))  # umbral dinámico por persona
         return float(np.clip((mar - floor) / 0.33, 0.0, 1.0))
 
     def is_mouth_open(self, face, threshold: float = 0.35) -> bool:
@@ -202,6 +205,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         from ..utils import image as imageutil
 
         s = self.settings
+        music = s.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
         if not faces:
             return frame
 
@@ -211,7 +215,10 @@ class FaceFusionSwapper(BaseFaceSwapper):
             kps = f.kps
             _, mouth_mask = imageutil.frame_eye_mouth_masks(kps, out.shape, boost)
             intensity = self._dynamic_openness(f, out, mouth_mask)   # 0..1
-            mouth_open = intensity >= 0.35
+            # En modo musical bajamos el umbral: el pase de dientes (CodeFormer 512)
+            # se mantiene activo en boca entreabierta y notas sostenidas, no solo en
+            # boca muy abierta -> dientes nítidos durante toda la frase cantada.
+            mouth_open = intensity >= (0.15 if music else 0.35)
             profile = float(np.clip((abs(self._yaw(f)) - 20.0) / 50.0, 0.0, 1.0))
 
             # 1) Realce de regiones: ojos siempre; boca escalada por la apertura.
@@ -227,6 +234,11 @@ class FaceFusionSwapper(BaseFaceSwapper):
             # 3) Blending de PERFIL: en caras de lado, recupera el borde original.
             if original is not None and profile > 0.0:
                 out = self._apply_profile_blending(out, original, f, profile)
+            # 4) Anti-plástico: reinyecta la textura de piel del frame original
+            #    dentro de la cara (quita el look ceroso del swap 128 + enhancer).
+            if original is not None and s.skin_detail > 0:
+                face_mask = imageutil.frame_face_mask(kps, out.shape)
+                out = imageutil.transfer_skin_detail(out, original, face_mask, amount=s.skin_detail)
         return out
 
     # ----- importación perezosa de FaceFusion ---------------------------------
@@ -316,22 +328,38 @@ class FaceFusionSwapper(BaseFaceSwapper):
         s = self.settings
         music = s.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
 
-        providers = [self.mm.facefusion_provider()]
+        # En DirectML añadimos "cpu" como fallback por-operación: CodeFormer tiene un
+        # input float64 que DirectML no soporta; onnxruntime coloca ESA op en CPU (en
+        # vez de reventar el proceso) y mantiene el swap y el resto en la GPU.
+        ff_provider = self.mm.facefusion_provider()
+        providers = [ff_provider, "cpu"] if ff_provider == "directml" else [ff_provider]
         # Ejecución / memoria
         self._set("execution_providers", providers)
         self._set("execution_device_id", "0")
         self._set("execution_thread_count", max(1, self.mm.info.cpu_count // 2))
         self._set("execution_queue_count", 1)
         self._set("download_providers", ["github", "huggingface"])
-        # Offloading VRAM->RAM/CPU según el modo de memoria.
-        self._set("video_memory_strategy", _VRAM_STRATEGY.get(s.memory_mode, "moderate"))
+        # Offloading VRAM->RAM/CPU según el modo de memoria. En DirectML (8 GB) la
+        # estrategia "tolerant" mantiene TODO en VRAM y la satura (CodeFormer no
+        # entra -> crash duro = "connection lost"). Usamos al menos "moderate" para
+        # que FaceFusion COMBINE VRAM+RAM (descarga modelos a RAM cuando hace falta).
+        strategy = _VRAM_STRATEGY.get(s.memory_mode, "moderate")
+        if self.mm.info.gpu_provider == "DmlExecutionProvider" and strategy == "tolerant":
+            strategy = "moderate"
+        self._set("video_memory_strategy", strategy)
 
         # Detector (yoloface va bien en perfiles); tamaño según det_size.
         self._set("face_detector_model", "yoloface")
         self._set("face_detector_size", f"{self.mm.det_size}x{self.mm.det_size}")
-        self._set("face_detector_angles", [0])
-        # Umbral más permisivo: detecta mejor perfiles laterales.
-        self._set("face_detector_score", 0.5 if music else 0.6)
+        # Ángulos de rotación del detector: en cabeza-atrás / caras inclinadas FF
+        # reintenta la detección sobre el frame rotado y recupera caras que a 0° se
+        # pierden (causa principal de "pierde la cara" en pitch extremo).
+        self._set("face_detector_angles", list(s.ff_detector_angles) or [0])
+        # Umbral de detección permisivo: conserva cajas de baja confianza (mentón arriba).
+        self._set("face_detector_score", float(s.ff_detector_score) if music else 0.6)
+        # Umbral de landmarks bajo: evita que FaceFusion DESCARTE la cara en
+        # cabeza-atrás (cuando cae la confianza del landmarker) -> sin salto de máscara.
+        self._set("face_landmarker_score", float(s.ff_landmarker_score))
 
         # Selección de caras objetivo.
         selector = {
@@ -345,7 +373,22 @@ class FaceFusionSwapper(BaseFaceSwapper):
 
         # Swapper + pixel boost (clave de calidad: corre el swap a mayor resolución).
         self._set("face_swapper_model", s.ff_swapper_model)
-        self._set("face_swapper_pixel_boost", "512x512" if music else s.ff_pixel_boost)
+        # Pixel boost = resolución interna del swap. AHORA es consciente del modelo:
+        # cada swapper tiene una resolución NATIVA mínima (FaceFusion rechaza un boost
+        # por debajo de ella). inswapper admite 128; hififace/ghost/simswap_256/uniface
+        # exigen 256; simswap_512 exige 512. Nunca bajamos de la nativa.
+        native = config.FF_SWAPPER_NATIVE_RES.get(s.ff_swapper_model, 256)
+        if self.mm.info.gpu_provider == "DmlExecutionProvider":
+            # En DirectML (8 GB) corremos a la resolución NATIVA del modelo: es toda la
+            # calidad del swap sin saturar la VRAM (CodeFormer corre a 512 aparte y pone
+            # la nitidez final). Antes forzábamos 128, lo que con un modelo de 256 es
+            # inválido (rompía el motor) y desperdiciaba su resolución nativa.
+            res = native
+        else:
+            # CUDA: deja subir por encima de la nativa (más VRAM disponible).
+            want = 512 if music else int(str(s.ff_pixel_boost).split("x")[0])
+            res = max(native, want)
+        self._set("face_swapper_pixel_boost", f"{res}x{res}")
 
         # Enhancer: en modo musical, CodeFormer fuerte (mejor dientes/textura).
         enhancer_model = "codeformer" if music else (
@@ -353,6 +396,11 @@ class FaceFusionSwapper(BaseFaceSwapper):
         )
         self._set("face_enhancer_model", enhancer_model)
         self._set("face_enhancer_blend", int(round(max(s.enhancer_blend, 0.85 if music else 0.6) * 100)))
+        # Peso del CodeFormer NATIVO de FaceFusion. FF usa 1.0 por defecto (= máxima
+        # fidelidad a la entrada, que aquí es un swap de baja resolución -> dientes
+        # borrosos). Bajarlo lleva a CodeFormer a RESTAURAR detalle desde su codebook
+        # = dientes nítidos. (0 = detalle/nítido, 1 = fiel a la entrada borrosa.)
+        self._set("face_enhancer_weight", float(np.clip(s.ff_enhancer_weight, 0.0, 1.0)))
 
         # Máscaras: oclusión (perfiles/pelo/manos) + región (ojos/boca) + caja.
         if music or s.mask_mode == config.MASK_PARSING:
