@@ -206,7 +206,12 @@ class InsightFaceSwapper(BaseFaceSwapper):
             face = imageutil.apply_color_transfer(face, ref)
 
         mask = self._build_face_mask(frame, target_face, affine, size)
-        return imageutil.paste_back_with_mask(frame, face, affine, mask, opacity=s.face_opacity)
+        out = imageutil.paste_back_with_mask(frame, face, affine, mask, opacity=s.face_opacity)
+        # Anti-plástico: reinyecta la textura de piel del frame original en la cara.
+        if s.skin_detail > 0:
+            face_mask = imageutil.frame_face_mask(target_face.kps, out.shape)
+            out = imageutil.transfer_skin_detail(out, frame, face_mask, amount=s.skin_detail)
+        return out
 
     # ----- API del motor -------------------------------------------------------
     def detect(self, frame: np.ndarray) -> List:

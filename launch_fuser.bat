@@ -35,8 +35,9 @@ echo.
 rem Abre la UI en su propia ventana cuando el servidor este listo (en segundo plano).
 start "" /b powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0open_fuser_window.ps1"
 
-rem Ejecuta la app (bloquea aqui y muestra los logs del servidor).
-"%PY%" app.py
+rem Ejecuta la app capturando TODO (stdout+stderr nativo, sin buffer) a un log,
+rem para poder diagnosticar crashes de DirectML que no dejan rastro de otro modo.
+"%PY%" -u app.py > "%~dp0fuser_console.log" 2>&1
 
 echo.
 echo ------------------------------------------------------------

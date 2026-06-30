@@ -336,6 +336,32 @@ def apply_local_detail(
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def transfer_skin_detail(
+    swapped: np.ndarray,
+    original: np.ndarray,
+    mask: np.ndarray,
+    amount: float = 0.5,
+    radius: float = 0.0,
+) -> np.ndarray:
+    """Reinyecta la **textura de piel** (alta frecuencia) del frame ORIGINAL sobre
+    la cara swapeada, dentro de ``mask``. Reduce el look "plástico/ceroso" que deja
+    el swap de 128 px + enhancer (que aplanan los poros y el grano de la piel).
+
+    El swap y el original están alineados (la cara se compone en la misma posición),
+    así que el detalle de alta frecuencia —poros, micro-textura— transfiere bien.
+    ``amount`` 0..1 escala la fuerza; ``mask`` (0..1) acota a la cara.
+    """
+    if amount <= 0 or mask.max() <= 0:
+        return swapped
+    side = min(swapped.shape[:2])
+    k = _odd(max(3, radius if radius > 1 else side * 0.012))
+    orig = original.astype(np.float32)
+    high = orig - cv2.GaussianBlur(orig, (k, k), 0)          # detalle fino del original
+    w = (np.clip(mask, 0.0, 1.0)[:, :, None] * float(np.clip(amount, 0.0, 1.5)))
+    out = swapped.astype(np.float32) + high * w
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def paste_back_with_mask(
     frame: np.ndarray,
     face: np.ndarray,
