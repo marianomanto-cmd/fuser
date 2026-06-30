@@ -1,0 +1,48 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "stable_audio_open_1.0.safetensors" },
+    "_meta": { "title": "Cargar Stable Audio Open" }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "ambient background music", "clip": ["1", 1] },
+    "_meta": { "title": "Prompt positivo (audio)" }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "noise, hiss, distortion, low quality", "clip": ["1", 1] },
+    "_meta": { "title": "Prompt negativo (audio)" }
+  },
+  "4": {
+    "class_type": "EmptyLatentAudio",
+    "inputs": { "seconds": 6.0, "batch_size": 1 },
+    "_meta": { "title": "Latente de audio vacío" }
+  },
+  "5": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 50,
+      "cfg": 4.5,
+      "sampler_name": "dpmpp_3m_sde_gpu",
+      "scheduler": "exponential",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "latent_image": ["4", 0]
+    },
+    "_meta": { "title": "Muestreo de audio" }
+  },
+  "6": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": { "samples": ["5", 0], "vae": ["1", 2] },
+    "_meta": { "title": "Decodificar audio" }
+  },
+  "7": {
+    "class_type": "SaveAudio",
+    "inputs": { "audio": ["6", 0], "filename_prefix": "fuser_audio" },
+    "_meta": { "title": "Guardar audio" }
+  }
+}

@@ -69,10 +69,27 @@ fuser/
     temporal.py             #   suavizado adaptativo (1 pasada) + bilateral centrado (2 pasadas)
     pipeline.py             #   orquestación AGNÓSTICA AL MOTOR (habla con BaseFaceSwapper): 1/2 pasadas, ETA, RAM
   utils/                    #   system (GPU/RAM/ffmpeg), video (ffmpeg), image (máscaras/paste), logging
-  ui/interface.py           #   UI Gradio (modo Videos musicales, controles de ojos/boca/máscara)
-scripts/                    # setup.sh/.bat, check_env.py, download_models.py
+  ui/interface.py           #   UI Gradio (pestaña face swap + pestaña Imagen→Vídeo)
+  ui/i2v_interface.py       #   UI de la pestaña Imagen→Vídeo (Wan 2.2)
+  i2v/                      #   FUNCIÓN OPCIONAL e independiente: Imagen→Vídeo vía ComfyUI
+    config.py               #     settings/presets de offload, registro de plantillas
+    comfy_client.py         #     cliente ComfyUI (urllib HTTP + websocket OPCIONAL)
+    workflow.py             #     carga plantilla JSON y la parchea POR class_type
+    models.py               #     catálogo de modelos (Wan GGUF, Stable Audio) + verificación
+    service.py              #     orquesta: subir img -> vídeo -> audio -> mezcla ffmpeg
+    workflows/*.json        #     plantillas (API format) de Wan 2.2 I2V y Stable Audio
+scripts/                    # setup.sh/.bat, check_env.py, download_models.py, setup_i2v.py
 models/                     # .onnx descargados (ignorado por git salvo .gitkeep)
 ```
+
+## Imagen → Vídeo (Wan 2.2 I2V) — función opcional
+- **Independiente del face swap**: NO comparte pipeline ni modelos. Usa un **ComfyUI
+  aparte** (proceso :8188) como motor; Fuser habla por HTTP/WebSocket. Si ComfyUI no
+  está, la pestaña lo dice con instrucciones (degrada como FaceFusion). Cero deps
+  nuevas obligatorias (cliente con `urllib`; `websocket-client` opcional, en
+  `requirements-i2v.txt`). El workflow se **parchea por `class_type`** (robusto si el
+  usuario exporta su propio JSON). Guía: `docs/IMAGE_TO_VIDEO.md`. Doctor:
+  `python scripts/setup_i2v.py`.
 
 ## Convenciones / decisiones clave
 - **Dos motores tras `BaseFaceSwapper`** (`fuser/engines/`): el `pipeline` llama a la interfaz, nunca

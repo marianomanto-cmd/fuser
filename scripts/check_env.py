@@ -109,6 +109,26 @@ def main() -> int:
         print(f"  {WARN}FaceFusion (Alta Calidad) — opcional, no instalado")
         print("     → Instálalo con:  bash scripts/install_facefusion.sh   (ver INSTALL.md)")
 
+    print("-" * 64)
+
+    # --- Función opcional: Imagen → Vídeo (Wan 2.2 vía ComfyUI) ---
+    print("Imagen → Vídeo (Wan 2.2 I2V vía ComfyUI) — función opcional:")
+    ws_ok, _ = _check_import("websocket")
+    print(f"  {OK if ws_ok else WARN}{'websocket-client' :16s} "
+          f"{'progreso en vivo' if ws_ok else 'opcional (pip install -r requirements-i2v.txt)'}")
+    try:
+        from fuser.i2v.config import DEFAULT_COMFY_URL
+        from fuser.i2v.comfy_client import ComfyUIClient
+        reachable = ComfyUIClient(DEFAULT_COMFY_URL, timeout=3).is_available()
+        if reachable:
+            print(f"  {OK} ComfyUI responde en {DEFAULT_COMFY_URL}")
+        else:
+            print(f"  {WARN}ComfyUI no detectado en {DEFAULT_COMFY_URL} (arráncalo solo si vas a usar esta función)")
+        print("     → Diagnóstico detallado:  python scripts/setup_i2v.py")
+        print("     → Guía completa:          docs/IMAGE_TO_VIDEO.md")
+    except Exception as exc:
+        print(f"  {WARN}No se pudo comprobar ComfyUI: {exc}")
+
     print("=" * 64)
 
     # --- Veredicto ---

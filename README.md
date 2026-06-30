@@ -24,6 +24,14 @@ usarla en tu máquina.
 > doblaje, investigación, arte). No la uses para suplantar identidades, acosar, ni crear
 > desinformación o contenido engañoso. Cumple las leyes de tu país.
 
+> 🎞️ **Novedad — Imagen → Vídeo (Wan 2.2 14B I2V).** Además del face swap, la app
+> incluye una pestaña **opcional** para generar un **vídeo corto (~480p, ~6 s, con
+> audio)** a partir de **una imagen + un prompt**, usando un **ComfyUI local** como
+> motor (Wan 2.2 I2V con **GGUF + offloading a RAM**, pensado para 8 GB de VRAM) y
+> **Stable Audio Open** para el sonido. Es independiente del face swap (no comparte
+> modelos ni pipeline). Guía completa: [`docs/IMAGE_TO_VIDEO.md`](docs/IMAGE_TO_VIDEO.md).
+> Diagnóstico: `python scripts/setup_i2v.py`.
+
 ---
 
 ## 📑 Tabla de contenidos
