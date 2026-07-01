@@ -21,11 +21,13 @@ log = get_logger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 def _parse_resolution(value: str) -> tuple[int, int]:
+    if (value or "").strip().lower() == "auto":
+        return 0, 0   # 0 = el servicio deriva el tamaño del aspecto de la imagen
     try:
         w, h = value.lower().split("x")
         return int(w), int(h)
     except Exception:
-        return 832, 480
+        return 0, 0
 
 
 def _build_settings(
@@ -143,10 +145,11 @@ def build_i2v_tab() -> None:
         with gr.Column(scale=3):
             image_in = gr.Image(label="🖼️ Imagen de entrada", type="filepath", height=320)
             prompt = gr.Textbox(
-                label="📝 Prompt (qué pasa en el vídeo)", lines=3,
-                placeholder="Ej.: a woman singing on a neon-lit stage, slow camera push-in, "
-                            "hair gently moving, cinematic lighting",
-                info="Describe el MOVIMIENTO y la escena. En inglés suele rendir mejor.",
+                label="📝 Prompt (SOLO el movimiento, no una escena nueva)", lines=3,
+                placeholder="Ej.: she turns her head slowly and smiles, gentle breeze in her hair, "
+                            "slow push-in  ·  (describe el MOVIMIENTO/cámara, no otra escena)",
+                info="La imagen YA define la apariencia: describí solo cómo se MUEVE (y quién es). "
+                     "Si describís una escena distinta, Wan puede inventarla. En inglés rinde mejor.",
             )
             negative = gr.Textbox(
                 label="🚫 Prompt negativo", value=i2vcfg.WAN_DEFAULT_NEGATIVE, lines=2,
@@ -162,8 +165,9 @@ def build_i2v_tab() -> None:
             label="🧠 Offload / VRAM", info="Cómo repartir el modelo entre VRAM y RAM en 8 GB.",
         )
         resolution = gr.Dropdown(
-            choices=i2vcfg.RESOLUTION_CHOICES, value="640x480", label="📐 Resolución",
-            info="Wan prefiere lados múltiplos de 16. En 8 GB empezá pequeño (640×480).",
+            choices=i2vcfg.RESOLUTION_CHOICES, value="auto", label="📐 Resolución",
+            info="AUTO = usa el aspecto de TU imagen (evita que Wan recorte y cambie la "
+                 "escena). Solo fijá una manual si sabés lo que hacés.",
         )
         duration = gr.Dropdown(
             choices=i2vcfg.DURATION_CHOICES, value=33, label="⏱️ Duración",
@@ -194,8 +198,9 @@ def build_i2v_tab() -> None:
         with gr.Row():
             steps = gr.Slider(8, 40, value=16, step=1, label="Pasos",
                               info="5B: 16 va bien. Menos = más rápido, más artefactos.")
-            cfg = gr.Slider(1.0, 8.0, value=5.0, step=0.5, label="CFG (guidance)",
-                            info="5B sin LoRA: ~5. (El 14B-Lightning usa cfg 1.)")
+            cfg = gr.Slider(1.0, 8.0, value=3.5, step=0.5, label="CFG (guidance)",
+                            info="Bajo (3.5) = respeta más TU imagen; alto = sigue más el prompt "
+                                 "(y puede inventar otra escena). El 14B-Lightning usa cfg 1.")
             shift = gr.Slider(1.0, 12.0, value=8.0, step=0.5, label="Shift (ModelSamplingSD3)",
                               info="8.0 va bien. Afecta al ritmo del movimiento.")
         with gr.Row():

@@ -120,12 +120,40 @@ OFFLOAD_LABELS: Dict[str, str] = {
 # ----------------------------------------------------------------------------
 # Wan trabaja mejor con lados múltiplos de 16. 480p ≈ 832x480 (16:9) o 480x832.
 RESOLUTION_CHOICES = [
+    ("Auto — según tu imagen (RECOMENDADO)", "auto"),
     ("480p horizontal 16:9 (832×480)", "832x480"),
     ("480p vertical 9:16 (480×832)", "480x832"),
     ("480p cuadrado (640×640)", "640x640"),
     ("640×480 4:3", "640x480"),
     ("512p horizontal (832×512)", "832x512"),
 ]
+
+
+def bucket_for_image(image_path, short: int = 480, cap: int = 832) -> tuple:
+    """Elige (width, height) que RESPETAN el aspecto de la imagen de entrada.
+
+    CLAVE contra el bug de "Wan cambia toda la escena": ``WanImageToVideo`` hace un
+    *center-crop* de la imagen para llenar el marco objetivo. Si el marco no coincide
+    con el aspecto de la foto (p.ej. foto vertical en un objetivo 640×480 apaisado),
+    Wan se queda con una tira central y ALUCINA el resto. Derivando el marco del
+    aspecto de la imagen (lado corto ≈480, lado largo tope 832, múltiplos de 16) el
+    recorte es mínimo y la imagen se conserva.
+    """
+    try:
+        import cv2
+        im = cv2.imread(str(image_path))
+        if im is None:
+            return 832, 480
+        h, w = im.shape[:2]
+        ar = w / max(1.0, h)
+        if ar >= 1.0:
+            hh, ww = short, min(cap, short * ar)
+        else:
+            ww, hh = short, min(cap, short / ar)
+        snap = lambda x: max(320, int(round(x / 16) * 16))
+        return snap(ww), snap(hh)
+    except Exception:
+        return 832, 480
 
 # Wan 2.2 trabaja a 16 fps. La longitud debe ser 4n+1 frames.
 #   97 frames / 16 fps = 6.06 s  (≈ los 6 s pedidos)
@@ -190,10 +218,10 @@ class I2VSettings:
     height: int = 384
     length_frames: int = 33                # 4n+1 ; 33 ≈ 2 s a 16 fps (rápido; subí a 49/81)
     fps: int = 16
-    # 5B sin LoRA distill: 16 pasos, cfg 5, sampler uni_pc, shift 8 (validado, buena
-    # calidad y ~3 min/clip). El 14B-Lightning usa otros (8 pasos, cfg 1, shift 5).
+    # 5B sin LoRA distill: 16 pasos, sampler uni_pc, shift 8. cfg BAJO (3.5) para que
+    # NO se vaya hacia el prompt e ignore la imagen (cfg alto = más texto, menos foto).
     steps: int = 16
-    cfg: float = 5.0
+    cfg: float = 3.5
     sampler: str = "uni_pc"
     scheduler: str = "simple"
     shift: float = 8.0

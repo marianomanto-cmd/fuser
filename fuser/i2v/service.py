@@ -149,6 +149,14 @@ class I2VService:
         ensure_i2v_dirs()
         s = self.settings
 
+        # Resolución AUTO por aspecto de la imagen (width/height <= 0). Evita que Wan
+        # haga center-crop de una foto vertical/cuadrada en un marco apaisado y
+        # "invente" el resto de la escena (el bug de "cambia toda la imagen").
+        if s.width <= 0 or s.height <= 0:
+            from .config import bucket_for_image
+            s.width, s.height = bucket_for_image(image_path)
+            log.info("i2v auto-res: %dx%d (según el aspecto de tu imagen)", s.width, s.height)
+
         def p(frac: float, msg: str = "") -> None:
             if progress:
                 progress(max(0.0, min(1.0, frac)), msg)
