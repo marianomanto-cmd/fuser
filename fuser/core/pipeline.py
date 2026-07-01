@@ -258,24 +258,39 @@ class SwapPipeline:
         log.info("QC: %s", report.summary())
 
         out2 = TEMP_DIR / f"fuser_qc_{int(time.time())}.mp4"
-        writer = videoutil.FFmpegVideoWriter(
-            str(out2), swap[0].shape[1], swap[0].shape[0], info.fps,
-            crf=self.settings.output_quality, encoder=self.settings.output_video_encoder,
-        )
         try:
-            for fr in swap:
-                writer.write(fr)
-        finally:
-            writer.close()
+            writer = videoutil.FFmpegVideoWriter(
+                str(out2), swap[0].shape[1], swap[0].shape[0], info.fps,
+                crf=self.settings.output_quality, encoder=self.settings.output_video_encoder,
+            )
+            try:
+                for fr in swap:
+                    writer.write(fr)
+            finally:
+                writer.close()
+        except Exception:
+            out2.unlink(missing_ok=True)   # no dejes un temporal a medias si falla el encode
+            raise
         if progress:
             progress(1.0, f"✅ 2ª pasada: {report.summary()}")
         return str(out2)
 
     def _recovery_reswap_fn(self):
         """Reconfigura el motor con DETECCIÓN AGRESIVA (mismo modelo) y devuelve
-        ``fn(frame)->swap``. Restaurar con ``_restore_after_recovery``."""
+        ``fn(frame)->swap``. Restaurar con ``_restore_after_recovery``.
+
+        Solo aporta con **FaceFusion**: reintenta la detección con más ángulos y
+        umbral bajo, y así recupera caras que a la 1ª pasada se cayeron. En
+        **InsightFace** el detector no es reconfigurable (los umbrales se fijan al
+        cargar buffalo_l), así que un re-swap daría EL MISMO resultado → gastaría GPU
+        sin arreglar nada. Ahí devolvemos None y la corrección usa solo el relleno
+        temporal (que sí funciona con cualquier motor).
+        """
         from dataclasses import replace
 
+        if self.settings.engine != config.ENGINE_FACEFUSION:
+            self._qc_saved_settings = None
+            return None
         self._qc_saved_settings = self.settings
         recovery = replace(
             self.settings, ff_detector_angles=(0, 90, 180, 270),
