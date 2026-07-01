@@ -39,6 +39,31 @@ log = get_logger(__name__)
 
 _PIPELINE_CACHE: dict = {"pipeline": None, "signature": None}
 
+
+def free_swap_vram() -> None:
+    """Descarga el pipeline de swap cacheado y libera su VRAM.
+
+    Clave para Imagen→Vídeo en 8 GB: el swap y ComfyUI comparten los 8 GB. Si el
+    swap tiene modelos cargados en la GPU cuando ComfyUI genera vídeo, la VRAM se
+    satura y la generación va ~50× más lenta (thrashing). La pestaña i2v llama a
+    esto antes de generar, así el usuario no tiene que cerrar nada a mano.
+    """
+    pipe = _PIPELINE_CACHE.get("pipeline")
+    if pipe is not None:
+        try:
+            if getattr(pipe, "engine", None) is not None:
+                pipe.engine.unload()
+        except Exception as exc:  # pragma: no cover
+            log.warning("No pude descargar el pipeline de swap: %s", exc)
+    _PIPELINE_CACHE["pipeline"] = None
+    _PIPELINE_CACHE["signature"] = None
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+
 # Intentos por video en la cola: si falla, se manda al FINAL y se reintenta luego;
 # tras este nº de intentos se descarta (evita un bucle infinito con un video imposible).
 QUEUE_MAX_ATTEMPTS = 2

@@ -52,13 +52,15 @@ GENERATION_TIMEOUT_S = int(os.environ.get("FUSER_I2V_TIMEOUT", "3600"))
 # Cada plantilla es un grafo en "API format" que la app carga y *parchea* por
 # ``class_type`` (no por id), de modo que también funciona si el usuario exporta
 # su propio workflow desde ComfyUI. Ver ``workflow.py``.
-WF_WAN22_I2V_LIGHTNING = "wan22_i2v_14b_lightning"  # GGUF + Lightning LoRA 4-step (RÁPIDO)
+WF_WAN22_TI2V_5B = "wan22_ti2v_5b"                  # 5B (cabe en 8 GB, RÁPIDO, default)
+WF_WAN22_I2V_LIGHTNING = "wan22_i2v_14b_lightning"  # GGUF 14B + Lightning LoRA 4-step
 WF_WAN22_I2V_GGUF = "wan22_i2v_14b_gguf"            # GGUF puro 20 pasos (lento; máx. calidad)
 WF_WAN22_I2V_DISTORCH = "wan22_i2v_14b_gguf_distorch"  # GGUF + DisTorch2 (offload a RAM máximo)
 WF_STABLE_AUDIO = "stable_audio"                     # texto -> audio (~6 s)
 
 WORKFLOW_LABELS: Dict[str, str] = {
-    WF_WAN22_I2V_LIGHTNING: "Wan 2.2 14B I2V · Lightning 4-step (RECOMENDADO, rápido en 8 GB)",
+    WF_WAN22_TI2V_5B: "Wan 2.2 5B TI2V · RECOMENDADO 8 GB (cabe entero, ~3 min/clip)",
+    WF_WAN22_I2V_LIGHTNING: "Wan 2.2 14B I2V · Lightning 4-step (más calidad, más lento)",
     WF_WAN22_I2V_GGUF: "Wan 2.2 14B I2V · GGUF 20 pasos (lento, máxima calidad)",
     WF_WAN22_I2V_DISTORCH: "Wan 2.2 14B I2V · GGUF + DisTorch2 (offload máximo a RAM)",
 }

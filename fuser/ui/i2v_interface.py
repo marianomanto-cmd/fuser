@@ -76,6 +76,14 @@ def _on_generate(image, prompt, negative, *control_values, progress=gr.Progress(
     def cb(frac, msg=""):
         progress(frac, desc=msg)
 
+    # En 8 GB el swap y ComfyUI comparten VRAM: liberamos la del swap ANTES de
+    # generar para no saturar (evita el thrashing que ralentiza ~50×).
+    try:
+        from .interface import free_swap_vram
+        free_swap_vram()
+    except Exception:  # pragma: no cover
+        pass
+
     try:
         progress(0.0, desc="Conectando con ComfyUI…")
         result = service.generate(image, prompt, negative, progress=cb)
