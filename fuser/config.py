@@ -320,11 +320,12 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         # Modo musical inteligente: recomienda FaceFusion (alta calidad), muchas
         # referencias, post-procesado agresivo de boca/dientes y 2 pasadas (RAM).
         engine="facefusion",
-        # Mayor calidad one-shot: ghost_3 (256 px) en vez de inswapper (128 px).
-        # Medido como el mejor en identidad de forma consistente (agent_tests), a 256
-        # px nativos; CodeFormer pone la nitidez final. Sin entrenar nada. ¿Identidad
-        # rara con TU cara? Probá hififace/simswap con "🔬 Comparar modelos".
-        ff_swapper_model="ghost_3_256", ff_pixel_boost="256x256",
+        # Default ESTABLE: inswapper_128 preserva la forma de la cara objetivo, así
+        # que NO se "mueve"/desencaja en mucho movimiento o perfiles (el menor bias
+        # medido). La nitidez la pone CodeFormer a 512. Para más identidad/detalle a
+        # costa de algo de estabilidad, elegí un modelo de 256 px o usá 🔬 Comparar
+        # modelos sobre TU material.
+        ff_swapper_model="inswapper_128", ff_pixel_boost="256x256",
         enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.5,
         ff_enhancer_weight=0.5,      # CodeFormer nativo hacia "detalle" -> dientes nítidos
         ff_detector_angles=(0, 90, 270),  # recupera caras inclinadas / cabeza atrás
@@ -343,7 +344,7 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
     ),
     EXPR_HIGH_EXPRESSION: dict(
         engine="facefusion",
-        ff_swapper_model="ghost_3_256", ff_pixel_boost="256x256",
+        ff_swapper_model="inswapper_128", ff_pixel_boost="256x256",
         enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.5,
         ff_enhancer_weight=0.5,
         ff_detector_angles=(0, 90, 180, 270),  # máxima recuperación de ángulos
@@ -394,20 +395,25 @@ ENGINE_INFO_MD = (
 #   simswap_512 -> máxima resolución (más lento/VRAM)
 #   inswapper -> base rápida/compatible
 # (hyperswap NO existe en FaceFusion 3.1.1 -> se eliminó para no romper el motor.)
-# Orden por idoneidad MEDIDA en agent_tests (cos sim ArcFace a la fuente + revisión
-# visual, sobre clips reales de canto/primer plano): ghost_3 gana en identidad de
-# forma consistente Y es 256 px; inswapper iguala identidad pero solo 128 px;
-# hififace fue inconsistente; simswap suaviza expresiones. Ver agent_tests/RESULTADOS.md.
+# Compromiso medido en agent_tests (jitter + "bias"=desalineación/'se sale' +
+# identidad ArcFace, sobre clips de canto con movimiento):
+#   - inswapper_128: PRESERVA la forma de la cara objetivo -> el bias más bajo
+#     (1.49) = no se "sale"/desencaja; el más ESTABLE en mucho movimiento. 128 px,
+#     pero CodeFormer a 512 pone la nitidez. Es el default (estabilidad).
+#   - ghost/hififace/simswap (256/512 px): TRANSFIEREN la forma de la cara fuente
+#     -> más identidad/detalle PERO bias alto (1.9-2.1) = en perfiles/movimiento
+#     fuerte la cara puede "moverse"/desencajar. Opcionales, para quien priorice
+#     identidad sobre estabilidad. Probalos en TU material con 🔬 Comparar modelos.
 FF_SWAPPER_CHOICES = [
-    ("ghost_3_256 (mejor identidad + detalle — recomendado)", "ghost_3_256"),
-    ("hififace_256 (forma de cara, alternativa)", "hififace_unofficial_256"),
-    ("simswap_256 (expresiones/boca más suaves)", "simswap_256"),
-    ("ghost_2_256 (identidad + detalle)", "ghost_2_256"),
-    ("simswap_512 (máxima resolución, más lento)", "simswap_unofficial_512"),
-    ("uniface_256", "uniface_256"),
-    ("blendswap_256", "blendswap_256"),
-    ("inswapper_128 (rápido, base 128 px)", "inswapper_128"),
-    ("inswapper_128_fp16 (menos VRAM)", "inswapper_128_fp16"),
+    ("inswapper_128 (estable, recomendado)", "inswapper_128"),
+    ("inswapper_128_fp16 (estable, menos VRAM)", "inswapper_128_fp16"),
+    ("ghost_3_256 (+identidad/detalle, puede moverse*)", "ghost_3_256"),
+    ("hififace_256 (+forma de cara, puede moverse*)", "hififace_unofficial_256"),
+    ("simswap_256 (+detalle, puede moverse*)", "simswap_256"),
+    ("ghost_2_256 (+identidad/detalle*)", "ghost_2_256"),
+    ("simswap_512 (máx. resolución, más lento*)", "simswap_unofficial_512"),
+    ("uniface_256 (*)", "uniface_256"),
+    ("blendswap_256 (*)", "blendswap_256"),
 ]
 
 FF_SWAPPER_LABELS = {k: lbl for lbl, k in FF_SWAPPER_CHOICES}

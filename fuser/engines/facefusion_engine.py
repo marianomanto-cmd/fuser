@@ -402,14 +402,36 @@ class FaceFusionSwapper(BaseFaceSwapper):
         # = dientes nítidos. (0 = detalle/nítido, 1 = fiel a la entrada borrosa.)
         self._set("face_enhancer_weight", float(np.clip(s.ff_enhancer_weight, 0.0, 1.0)))
 
-        # Máscaras: oclusión (perfiles/pelo/manos) + región (ojos/boca) + caja.
-        if music or s.mask_mode == config.MASK_PARSING:
-            self._set("face_mask_types", ["box", "occlusion", "region"])
+        # ----- Máscaras: CLAVE para que el swap NO se "salga" de la cara -------
+        # FaceFusion INTERSECTA las máscaras (numpy.minimum.reduce) y el PADDING solo
+        # afecta a la CAJA (box). Los modelos que transfieren la FORMA de cara
+        # (ghost/hififace/simswap/uniface/blendswap) dibujan una cara MÁS GRANDE que
+        # la del objetivo; el parser (region) sigue ESA cara grande -> se "sale" en
+        # mentón/cuello. Solución correcta: MANTENER la caja y RETRAERLA con padding;
+        # como las máscaras se intersectan, la caja retraída recorta el sobrante del
+        # parser. (Quitar la caja NO sirve: el padding deja de aplicarse. Investigado:
+        # r/FF + lectura de facefusion/face_masker.py — ver research_cheatsheet.json.)
+        shape_transfer = s.ff_swapper_model not in ("inswapper_128", "inswapper_128_fp16")
+        # Modelos de máscara de máxima calidad (se descargan solos la 1ª vez).
+        self._set("face_occluder_model", "xseg_1")            # oclusión pelo/manos/micro
+        self._set("face_parser_model", "bisenet_resnet_34")   # parser de cara más fino
+        if shape_transfer:
+            self._set("face_mask_types", ["box", "occlusion", "region"])  # box + padding
+            # (top, right, bottom, left) en %. Bottom alto retrae fuera del mentón/cuello;
+            # laterales para que la mandíbula no invada; top suave (no cortar la frente).
+            self._set("face_mask_padding", (2, 9, 18, 9))
+            # Difuminado mayor: funde el cambio tonal del modelo en la piel objetivo.
+            self._set("face_mask_blur", float(np.clip(max(s.mask_blur, 0.42), 0.0, 1.0)))
         else:
-            self._set("face_mask_types", ["box", "occlusion"])
-        self._set("face_mask_blur", float(np.clip(s.mask_blur, 0.0, 1.0)))
-        self._set("face_mask_padding", (0, 0, 0, 0))
-        # Regiones a conservar/incluir (todas las faciales, incluida la boca).
+            if music or s.mask_mode == config.MASK_PARSING:
+                self._set("face_mask_types", ["box", "occlusion", "region"])
+            else:
+                self._set("face_mask_types", ["box", "occlusion"])
+            self._set("face_mask_padding", (0, 0, 0, 0))
+            self._set("face_mask_blur", float(np.clip(s.mask_blur, 0.0, 1.0)))
+        # Regiones faciales a INCLUIR. Mantenemos boca/labios (clave para el canto:
+        # dientes y boca abierta). El recorte fino del contorno lo hacen el parser
+        # (region) + occluder + el padding inferior, no la exclusión de la boca.
         self._set("face_mask_regions", [
             "skin", "left-eyebrow", "right-eyebrow", "left-eye", "right-eye",
             "nose", "mouth", "upper-lip", "lower-lip",
