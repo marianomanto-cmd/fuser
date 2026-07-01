@@ -400,7 +400,13 @@ class FaceFusionSwapper(BaseFaceSwapper):
         # fidelidad a la entrada, que aquí es un swap de baja resolución -> dientes
         # borrosos). Bajarlo lleva a CodeFormer a RESTAURAR detalle desde su codebook
         # = dientes nítidos. (0 = detalle/nítido, 1 = fiel a la entrada borrosa.)
-        self._set("face_enhancer_weight", float(np.clip(s.ff_enhancer_weight, 0.0, 1.0)))
+        enh_weight = s.ff_enhancer_weight
+        if "simswap" in s.ff_swapper_model:
+            # simswap suaviza el detalle (sobre todo ojos): empujamos CodeFormer a
+            # restaurar MÁS (peso más bajo) para recuperar algo de nitidez. Ayuda solo
+            # de forma marginal — simswap es intrínsecamente suave (ver eye_test.py).
+            enh_weight = min(enh_weight, 0.2)
+        self._set("face_enhancer_weight", float(np.clip(enh_weight, 0.0, 1.0)))
 
         # ----- Máscaras: CLAVE para que el swap NO se "salga" de la cara -------
         # FaceFusion INTERSECTA las máscaras (numpy.minimum.reduce) y el PADDING solo

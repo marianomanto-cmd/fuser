@@ -404,14 +404,19 @@ ENGINE_INFO_MD = (
 #     -> más identidad/detalle PERO bias alto (1.9-2.1) = en perfiles/movimiento
 #     fuerte la cara puede "moverse"/desencajar. Opcionales, para quien priorice
 #     identidad sobre estabilidad. Probalos en TU material con 🔬 Comparar modelos.
+#   NOTA sobre nitidez: simswap (256 y 512) da un look SUAVE/promediado por su
+#   arquitectura — sobre todo en los OJOS, que salen poco nítidos/borrosos y NO se
+#   arreglan del todo con el enhancer (medido en agent_tests/eye_test.py). Para ojos
+#   nítidos usá ghost_3 o inswapper. Etiquetas honestas (antes decían "+detalle"/
+#   "máx. resolución", que era al revés).
 FF_SWAPPER_CHOICES = [
     ("inswapper_128 (estable, recomendado)", "inswapper_128"),
     ("inswapper_128_fp16 (estable, menos VRAM)", "inswapper_128_fp16"),
-    ("ghost_3_256 (+identidad/detalle, puede moverse*)", "ghost_3_256"),
-    ("hififace_256 (+forma de cara, puede moverse*)", "hififace_unofficial_256"),
-    ("simswap_256 (+detalle, puede moverse*)", "simswap_256"),
+    ("ghost_3_256 (+identidad, ojos más NÍTIDOS*)", "ghost_3_256"),
+    ("hififace_256 (+forma de cara*)", "hififace_unofficial_256"),
     ("ghost_2_256 (+identidad/detalle*)", "ghost_2_256"),
-    ("simswap_512 (máx. resolución, más lento*)", "simswap_unofficial_512"),
+    ("simswap_256 (look suave; ojos poco nítidos*)", "simswap_256"),
+    ("simswap_512 (suave y lento; ojos BORROSOS → usá ghost_3*)", "simswap_unofficial_512"),
     ("uniface_256 (*)", "uniface_256"),
     ("blendswap_256 (*)", "blendswap_256"),
 ]

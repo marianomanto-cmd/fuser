@@ -738,9 +738,9 @@ def build_interface() -> gr.Blocks:
                         ff_swapper_model = gr.Dropdown(
                             choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
                             label="Modelo de swap de FaceFusion",
-                            info="inswapper_128 = el más ESTABLE (preserva la forma de cara, no se "
-                                 "'mueve'). Los de 256 px (ghost/hififace/simswap) dan más identidad/"
-                                 "detalle pero transfieren la forma → pueden moverse más en perfiles.",
+                            info="inswapper_128 = el más ESTABLE (no se 'mueve'). Para más identidad "
+                                 "con OJOS nítidos → ghost_3_256. simswap da un look suave (ojos "
+                                 "borrosos). Los de 256 px transfieren la forma → se mueven más en perfiles.",
                         )
                         ff_pixel_boost = gr.Dropdown(
                             choices=config.FF_PIXEL_BOOST_CHOICES, value="256x256",
