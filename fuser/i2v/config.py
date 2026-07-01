@@ -200,9 +200,10 @@ class I2VSettings:
     seed: int = -1                         # -1 = aleatoria
 
     # --- Audio (segundo paso, modelo aparte) ---
-    # OFF por defecto: Stable Audio Open no está instalado en esta máquina (es
-    # *gated* en HF). El vídeo se entrega sin sonido salvo que lo instales y actives.
-    audio_enabled: bool = False
+    # ON: Stable Audio Open ya está instalado (checkpoint de Comfy-Org, no-gated) +
+    # t5_base. Wan no genera sonido; esto crea una pista de audio y la mezcla con
+    # ffmpeg. Si falla, el vídeo se entrega sin sonido (no rompe la generación).
+    audio_enabled: bool = True
     audio_prompt: str = ""                 # si vacío, se deriva del prompt de vídeo
     audio_negative: str = DEFAULT_AUDIO_NEGATIVE
     audio_seconds: float = 0.0             # 0 = igualar a la duración del vídeo

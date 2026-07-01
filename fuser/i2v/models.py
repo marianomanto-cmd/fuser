@@ -115,14 +115,15 @@ AUDIO_MODELS: List[I2VModelFile] = [
     I2VModelFile(
         key="stable_audio",
         filename="stable_audio_open_1.0.safetensors",
-        repo="stabilityai/stable-audio-open-1.0",
-        path_in_repo="model.safetensors",
+        # Copia REPACKAGED de Comfy-Org (misma org que los modelos de Wan): es el
+        # modelo BASE, NO-gated, así que se descarga sin token (el repo oficial de
+        # stabilityai está gated). El fichero ya viene con ese nombre en checkpoints/.
+        repo="Comfy-Org/stable-audio-open-1.0_repackaged",
+        path_in_repo="stable-audio-open-1.0.safetensors",
         subfolder="checkpoints",
-        size_gb=4.9,
+        size_gb=4.85,
         kind="audio",
-        gated=True,
-        note="REQUIERE aceptar la licencia en HF y un token (HF_TOKEN). Renómbralo a "
-             "stable_audio_open_1.0.safetensors.",
+        note="Stable Audio Open 1.0 (checkpoint all-in-one: modelo + T5 + VAE).",
     ),
     I2VModelFile(
         key="t5_base",

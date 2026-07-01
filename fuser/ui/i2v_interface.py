@@ -175,9 +175,9 @@ def build_i2v_tab() -> None:
     with gr.Accordion("🔊 Audio", open=True):
         with gr.Row():
             audio_enabled = gr.Checkbox(
-                value=False, label="Generar audio (Stable Audio Open) y mezclarlo",
-                info="OFF por defecto (Stable Audio no está instalado en esta máquina). "
-                     "Wan no genera sonido; esto crearía una pista aparte y la mezclaría con ffmpeg.",
+                value=True, label="Generar audio (Stable Audio Open) y mezclarlo",
+                info="Wan no genera sonido: esto crea una pista de audio (Stable Audio Open) que "
+                     "matchea la duración y la mezcla con ffmpeg. Si falla, el vídeo sale sin sonido.",
             )
             audio_prompt = gr.Textbox(
                 label="Prompt de audio (vacío = usa el del vídeo)", lines=1,
