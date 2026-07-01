@@ -88,6 +88,7 @@ def _build_settings(
     memory_mode, gpu_mem_limit, force_cpu, ram_mode,
     keep_audio, keep_fps, output_quality,
     skin_detail,
+    qc_second_pass, qc_sensitivity,
 ) -> config.Settings:
     return config.Settings(
         engine=engine,
@@ -126,6 +127,8 @@ def _build_settings(
         keep_fps=bool(keep_fps),
         output_quality=int(output_quality),
         skin_detail=float(skin_detail),
+        qc_second_pass=bool(qc_second_pass),
+        qc_sensitivity=float(qc_sensitivity),
     )
 
 
@@ -844,6 +847,17 @@ def build_interface() -> gr.Blocks:
 
                 with gr.Group():
                     gr.Markdown("#### 🚀 Process")
+                    qc_second_pass = gr.Checkbox(
+                        value=False, label="🔍 2ª pasada: detectar y corregir defectos",
+                        info="Al terminar el vídeo, hace un repaso: detecta frames defectuosos "
+                             "(cara sin swapear, borrosa, identidad rara o salto) y los CORRIGE con "
+                             "el MISMO modelo (re-swap con detección agresiva o relleno desde vecinos "
+                             "buenos). Suma tiempo al final; usa RAM (mejor en clips cortos).",
+                    )
+                    qc_sensitivity = gr.Slider(
+                        0.0, 1.0, value=0.5, step=0.05, label="Sensibilidad de la 2ª pasada",
+                        info="0 = solo defectos claros · 1 = agresivo (marca y corrige más frames).",
+                    )
                     process_btn = gr.Button("🚀 Procesar vídeo completo", variant="primary")
 
         # ===== Más modos: Imagen→Vídeo · comparar modelos · herramientas =====
@@ -906,6 +920,7 @@ def build_interface() -> gr.Blocks:
             memory_mode, gpu_mem_limit, force_cpu, ram_mode,
             keep_audio, keep_fps, output_quality,
             skin_detail,
+            qc_second_pass, qc_sensitivity,
         ]
 
         # ----- Wiring (sin cambios) -----------------------------------------

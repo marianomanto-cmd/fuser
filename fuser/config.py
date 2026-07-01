@@ -533,6 +533,13 @@ class Settings:
     motion_adaptive: bool = True            # menos suavizado cuando hay movimiento rápido
     two_pass_temporal: bool = False         # 2 pasadas (estabilidad sin lag, usa RAM)
 
+    # --- Segunda pasada: corrección automática de defectos ---
+    # Tras terminar el vídeo, hace un repaso: detecta frames defectuosos (cara sin
+    # swapear, borrosa, identidad rara o salto temporal) y los CORRIGE con el MISMO
+    # modelo (re-swap con detección agresiva o relleno temporal desde vecinos buenos).
+    qc_second_pass: bool = False
+    qc_sensitivity: float = 0.5             # 0=solo defectos claros … 1=agresivo (marca más)
+
     # --- Memoria ---
     memory_mode: str = MODE_BALANCED
     gpu_mem_limit_gb: float = 0.0           # 0 = usar el del preset

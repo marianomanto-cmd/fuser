@@ -177,6 +177,10 @@ class SwapPipeline:
         finally:
             writer.close()
 
+        # Segunda pasada opcional: detecta frames defectuosos y los corrige.
+        if self.settings.qc_second_pass:
+            tmp_video = Path(self._run_qc_pass(video_path, tmp_video, info, progress))
+
         return self._finalize(tmp_video, video_path, info, final_out, processed, progress)
 
     def _finalize(self, tmp_video, video_path, info, final_out, processed, progress) -> str:
@@ -193,6 +197,99 @@ class SwapPipeline:
             progress(1.0, "¡Vídeo listo!")
         log.info("Vídeo generado: %s (%d frames)", final_out, processed)
         return str(final_out)
+
+    # ----- 2ª pasada: detección + corrección de defectos ----------------------
+    def _run_qc_pass(self, video_path, swapped_video, info, progress: ProgressCb):
+        """Detecta frames defectuosos del vídeo swapeado y los corrige con el MISMO
+        modelo (re-swap con detección agresiva o relleno temporal). Devuelve la ruta
+        del vídeo (corregido, o el original si no hubo nada que arreglar)."""
+        from . import qc_pass
+        from ..models.face_analyser import FaceAnalyser
+
+        proc_res = self.settings.processing_resolution
+        orig = [imageutil.limit_resolution(f, proc_res)[0] for f in videoutil.read_frames(video_path)]
+        swap = list(videoutil.read_frames(str(swapped_video)))
+        n = min(len(orig), len(swap))
+        orig, swap = orig[:n], swap[:n]
+        if n < 8:
+            return str(swapped_video)
+
+        # Guardia de RAM: el QC mantiene ~2 juegos de frames en memoria.
+        h, w = swap[0].shape[:2]
+        need_gb = 2.2 * n * h * w * 3 / (1024 ** 3)
+        avail = self.mm.info.ram_available_gb or 8.0
+        if need_gb > 0.45 * avail:
+            log.warning("QC: vídeo demasiado largo para la RAM (~%.1f GB > presupuesto). Se "
+                        "omite la 2ª pasada; cortá el vídeo en partes para usarla.", need_gb)
+            if progress:
+                progress(0.99, "2ª pasada omitida (vídeo largo): cortalo en partes.")
+            return str(swapped_video)
+
+        if progress:
+            progress(0.0, "🔍 Segunda pasada: analizando defectos…")
+        analyser = FaceAnalyser(self.mm.analyser_providers(), self.mm.ctx_id(), self.mm.det_size)
+        analyser.load()
+        metrics = qc_pass.analyze(
+            orig, swap, analyser,
+            progress=lambda f, m="": progress and progress(0.45 * f, m),
+        )
+        defects = qc_pass.flag_defects(metrics, self.settings.qc_sensitivity)
+        if not defects:
+            log.info("QC: sin defectos en %d frames.", n)
+            if progress:
+                progress(1.0, "✅ Segunda pasada: no se encontraron defectos.")
+            return str(swapped_video)
+
+        reswap_fn = self._recovery_reswap_fn()
+        report = qc_pass.correct(
+            orig, swap, metrics, defects, analyser, reswap_fn=reswap_fn,
+            progress=lambda f, m="": progress and progress(0.45 + 0.45 * f, m),
+        )
+        self._restore_after_recovery()
+        log.info("QC: %s", report.summary())
+
+        out2 = TEMP_DIR / f"fuser_qc_{int(time.time())}.mp4"
+        writer = videoutil.FFmpegVideoWriter(
+            str(out2), swap[0].shape[1], swap[0].shape[0], info.fps,
+            crf=self.settings.output_quality, encoder=self.settings.output_video_encoder,
+        )
+        try:
+            for fr in swap:
+                writer.write(fr)
+        finally:
+            writer.close()
+        if progress:
+            progress(1.0, f"✅ 2ª pasada: {report.summary()}")
+        return str(out2)
+
+    def _recovery_reswap_fn(self):
+        """Reconfigura el motor con DETECCIÓN AGRESIVA (mismo modelo) y devuelve
+        ``fn(frame)->swap``. Restaurar con ``_restore_after_recovery``."""
+        from dataclasses import replace
+
+        self._qc_saved_settings = self.settings
+        recovery = replace(
+            self.settings, ff_detector_angles=(0, 90, 180, 270),
+            ff_detector_score=0.25, ff_landmarker_score=0.15, ff_temporal_fallback=True,
+        )
+        try:
+            self.engine.update_runtime(recovery)
+        except Exception as exc:  # pragma: no cover
+            log.warning("QC: no pude configurar el re-swap de recuperación: %s", exc)
+            return None
+
+        def _fn(frame):
+            return self.engine.process_frame(frame, use_smoothing=False)
+
+        return _fn
+
+    def _restore_after_recovery(self) -> None:
+        if getattr(self, "_qc_saved_settings", None) is not None:
+            try:
+                self.engine.update_runtime(self._qc_saved_settings)
+            except Exception:  # pragma: no cover
+                pass
+            self._qc_saved_settings = None
 
     def _emit_progress(self, progress, processed, total, start, prefix=""):
         if not progress:
