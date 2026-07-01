@@ -14,6 +14,7 @@ No importa nada pesado: solo ``fuser`` + librería estándar. La UI llama a
 """
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -141,7 +142,10 @@ class I2VService:
     # --------------------------------------------------------------- generate
     def generate(self, image_path: str, prompt: str, negative: str = "",
                  *, progress: ProgressCb = None) -> Dict:
-        """Genera el vídeo (con audio si está activado). Devuelve dict con rutas."""
+        """Genera el vídeo. Si ``settings.n_clips`` > 1 ENCADENA clips (el último
+        frame de cada clip es la imagen de arranque del siguiente) y los une en un
+        único vídeo. En 8 GB encadenar clips cortos es la vía FIABLE para ~10 s
+        (una sola pasada larga suele petar el VAE). Devuelve dict con rutas."""
         if not image_path:
             raise I2VGenerationError("Sube una imagen de entrada.")
         if not (prompt or "").strip():
@@ -162,21 +166,94 @@ class I2VService:
                 progress(max(0.0, min(1.0, frac)), msg)
 
         self.ensure_available()
-
-        # 1) Subir imagen
-        p(0.01, "Subiendo imagen a ComfyUI…")
+        n = self._n_clips()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        tmps: List[Path] = []
         try:
-            image_ref = self.client.upload_image(image_path)
+            clips = self._render_chain(image_path, prompt, negative, n=n, ts=ts,
+                                       phase=(0.02, 0.72), progress=p, tmps=tmps)
+            video_tmp = self._join_clips(clips, ts, progress=p, tmps=tmps)
+            return self._finalize(video_tmp, prompt, ts, progress=p, tmps=tmps,
+                                  resolution=f"{s.width}x{s.height}")
+        finally:
+            self._cleanup(tmps)
+
+    # ---------------------------------------------------------------- extend
+    def extend(self, base_video: str, prompt: str, negative: str = "",
+               *, progress: ProgressCb = None) -> Dict:
+        """Extiende un vídeo YA generado: toma su ÚLTIMO frame como imagen de
+        arranque de ``settings.n_clips`` clips nuevos y los pega detrás del vídeo
+        base (uno tras otro). La continuación usa la MISMA resolución que el base."""
+        if not base_video or not Path(base_video).exists():
+            raise I2VGenerationError("No hay un vídeo base para extender (genera uno primero).")
+        if not (prompt or "").strip():
+            raise I2VGenerationError("Escribe un prompt para la continuación (describe el movimiento).")
+        ensure_i2v_dirs()
+        s = self.settings
+        info = videoutil.probe(base_video)
+        s.width, s.height = info.width, info.height   # unir sin reescalar
+
+        def p(frac: float, msg: str = "") -> None:
+            if progress:
+                progress(max(0.0, min(1.0, frac)), msg)
+
+        self.ensure_available()
+        n = self._n_clips()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        tmps: List[Path] = []
+        try:
+            p(0.02, "Tomando el último frame del vídeo…")
+            seed = TEMP_DIR / f"i2v_{ts}_seedbase.png"
+            videoutil.save_last_frame(base_video, str(seed)); tmps.append(seed)
+            clips = self._render_chain(str(seed), prompt, negative, n=n, ts=ts,
+                                       phase=(0.05, 0.72), progress=p, tmps=tmps)
+            # Une el vídeo base + los clips nuevos (force: siempre reencoda para pegar).
+            video_tmp = self._join_clips([base_video, *clips], ts, progress=p,
+                                         tmps=tmps, force=True)
+            return self._finalize(video_tmp, prompt, ts, progress=p, tmps=tmps,
+                                  resolution=f"{info.width}x{info.height}")
+        finally:
+            self._cleanup(tmps)
+
+    # ------------------------------------------------------------- internos
+    def _n_clips(self) -> int:
+        from .config import MAX_N_CLIPS
+        return max(1, min(MAX_N_CLIPS, int(getattr(self.settings, "n_clips", 1) or 1)))
+
+    def _render_chain(self, start_image: str, prompt: str, negative: str, *,
+                      n: int, ts: str, phase: tuple, progress: ProgressCb,
+                      tmps: List[Path]) -> List[Path]:
+        """Renderiza ``n`` clips encadenados: último frame -> arranque del siguiente."""
+        lo, hi = phase
+        clips: List[Path] = []
+        cur = start_image
+        for i in range(n):
+            a = lo + (hi - lo) * (i / n)
+            b = lo + (hi - lo) * ((i + 1) / n)
+            msg = (f"Generando clip {i+1}/{n}…" if n > 1
+                   else "Generando vídeo (varios minutos en 8 GB)…")
+            clip = self._render_clip(cur, prompt, negative, tag=f"{ts}_{i}",
+                                     phase=(a, b), phase_msg=msg, progress=progress)
+            clips.append(clip); tmps.append(clip)
+            if i < n - 1:
+                # Frame de enlace SIN pérdida (PNG); solo se reencoda al unir al final.
+                seed = TEMP_DIR / f"i2v_{ts}_seed{i}.png"
+                videoutil.save_last_frame(str(clip), str(seed))
+                cur = str(seed); tmps.append(seed)
+        return clips
+
+    def _render_clip(self, image_path: str, prompt: str, negative: str, *, tag: str,
+                     phase: tuple, phase_msg: str, progress: ProgressCb) -> Path:
+        """Sube la imagen, parchea el workflow y genera UN clip. Devuelve la ruta tmp."""
+        s = self.settings
+        try:
+            image_ref = self.client.upload_image(str(image_path))
         except ComfyUIError as exc:
             raise I2VGenerationError(f"No se pudo subir la imagen: {exc}") from exc
-
-        # 2) Generar vídeo
-        p(0.03, "Preparando workflow de vídeo (Wan 2.2 I2V)…")
         try:
             graph = wf.load_workflow(s.workflow)
         except Exception as exc:
             raise I2VGenerationError(f"No se pudo cargar el workflow '{s.workflow}': {exc}") from exc
-
         graph = wf.patch_i2v(
             graph, image=image_ref, positive=prompt, negative=negative or "",
             width=s.width, height=s.height, length=s.length_frames, fps=s.fps,
@@ -185,43 +262,72 @@ class I2VService:
             high_model=s.high_noise_model, low_model=s.low_noise_model,
             virtual_vram_gb=s.virtual_vram_gb,
         )
-        video_out = self._run_graph(
-            graph, media="video", phase=(0.05, 0.72),
-            phase_msg="Generando vídeo (esto tarda varios minutos en 8 GB)…",
-            progress=p,
-        )
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        video_tmp = TEMP_DIR / f"i2v_{ts}{Path(video_out.filename).suffix or '.mp4'}"
-        self.client.download(video_out, str(video_tmp))
+        out = self._run_graph(graph, media="video", phase=phase,
+                              phase_msg=phase_msg, progress=progress)
+        dest = TEMP_DIR / f"i2v_{tag}{Path(out.filename).suffix or '.mp4'}"
+        self.client.download(out, str(dest))
+        return dest
 
-        # 3) Audio (opcional)
+    def _join_clips(self, clips: List, ts: str, *, progress: ProgressCb,
+                    tmps: List[Path], force: bool = False) -> Path:
+        """Une clips (con ``drop_seam``). 1 clip y sin ``force`` -> se devuelve tal cual."""
+        paths = [Path(c) for c in clips]
+        if len(paths) == 1 and not force:
+            return paths[0]
+        progress(0.73, "Uniendo los clips…")
+        joined = TEMP_DIR / f"i2v_{ts}_joined.mp4"
+        if not videoutil.concat_videos([str(c) for c in paths], str(joined), drop_seam=True):
+            raise I2VGenerationError("No se pudieron unir los clips (¿ffmpeg en el PATH?).")
+        tmps.append(joined)
+        return joined
+
+    def _finalize(self, video_tmp: Path, prompt: str, ts: str, *,
+                  progress: ProgressCb, tmps: List[Path], resolution: str) -> Dict:
+        """Audio (opcional, para la duración REAL del vídeo) + copia a outputs/."""
+        info = videoutil.probe(str(video_tmp))
         audio_tmp: Optional[Path] = None
-        if s.audio_enabled:
+        note = ""
+        if self.settings.audio_enabled:
             try:
-                audio_tmp = self._generate_audio(prompt, ts, progress=p)
+                audio_tmp = self._generate_audio(prompt, ts, seconds=info.duration + 0.2,
+                                                 progress=progress)
+                if audio_tmp:
+                    tmps.append(audio_tmp)
             except Exception as exc:  # el audio no debe tumbar el resultado
                 log.warning("Fallo al generar audio: %s", exc)
-                p(0.90, "Audio no disponible; entrego el vídeo sin sonido.")
+                note = "Audio no disponible (falló su generación); vídeo sin sonido."
+                progress(0.90, "Audio no disponible; entrego el vídeo sin sonido.")
 
-        # 4) Mezcla / salida final
-        p(0.92, "Finalizando…")
+        progress(0.92, "Finalizando…")
         final = I2V_OUTPUT_DIR / f"i2v_{ts}.mp4"
         muxed = False
         if audio_tmp and audio_tmp.exists():
             muxed = videoutil.mux_external_audio(str(video_tmp), str(audio_tmp), str(final))
+            if not muxed:
+                log.warning("El audio se generó pero el mux con ffmpeg falló; vídeo sin "
+                            "sonido. ¿ffmpeg instalado y en PATH?")
+                note = "Audio generado pero no se pudo mezclar (¿ffmpeg en PATH?)."
         if not muxed:
-            # Sin audio: copiamos el vídeo tal cual a la carpeta de salida.
-            final.write_bytes(Path(video_tmp).read_bytes())
-        p(1.0, "¡Listo!")
-
+            shutil.copyfile(str(video_tmp), str(final))
+        progress(1.0, "¡Listo!")
         return {
             "video": str(final),
             "has_audio": muxed,
-            "seconds": round(s.length_frames / max(1, s.fps), 1),
-            "resolution": f"{s.width}x{s.height}",
+            "seconds": round(info.duration, 1),
+            "resolution": resolution,
+            "note": note,
         }
 
-    def _generate_audio(self, video_prompt: str, ts: str, *, progress: ProgressCb) -> Optional[Path]:
+    def _cleanup(self, tmps: List[Path]) -> None:
+        for tmp in tmps:
+            try:
+                if tmp and Path(tmp).exists():
+                    Path(tmp).unlink()
+            except Exception:
+                pass
+
+    def _generate_audio(self, video_prompt: str, ts: str, *, seconds: float,
+                        progress: ProgressCb) -> Optional[Path]:
         s = self.settings
         if progress:
             progress(0.74, "Generando audio (Stable Audio Open)…")
@@ -229,7 +335,7 @@ class I2VService:
         audio_prompt = (s.audio_prompt or "").strip() or video_prompt
         graph = wf.patch_audio(
             graph, prompt=audio_prompt, negative=s.audio_negative,
-            seconds=s.audio_seconds, seed=s.audio_seed,
+            seconds=float(seconds), seed=s.audio_seed,
             steps=s.audio_steps, cfg=s.audio_cfg,
         )
         out = self._run_graph(
@@ -255,7 +361,16 @@ class I2VService:
             if progress:
                 progress(lo + (hi - lo) * frac, msg or phase_msg)
 
-        outputs = self.client.wait(prompt_id, progress=sub, timeout=GENERATION_TIMEOUT_S)
+        try:
+            outputs = self.client.wait(prompt_id, progress=sub, timeout=GENERATION_TIMEOUT_S)
+        except ComfyUIError as exc:
+            # Si abandonamos (timeout u otro error) NO dejes el job huérfano
+            # ocupando la GPU: en 8 GB bloquearía el siguiente intento / el swap.
+            try:
+                self.client.interrupt()
+            except Exception:
+                pass
+            raise I2VGenerationError(str(exc)) from exc
         result = self.client.pick_output(outputs, media)
         if result is None:
             raise I2VGenerationError(

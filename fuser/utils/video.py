@@ -185,6 +185,121 @@ class FFmpegVideoWriter:
         self.proc.wait()
 
 
+def last_frame(path: str) -> np.ndarray:
+    """Devuelve el ÚLTIMO frame (BGR) de un vídeo, de forma robusta.
+
+    Usado por la función *Extender vídeo*: el último frame de un clip se usa como
+    imagen de arranque del siguiente. Busca unos frames antes del final y lee
+    hasta el último real (``CAP_PROP_FRAME_COUNT`` puede quedarse corto).
+    """
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"No se pudo abrir el vídeo: {path}")
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total > 5:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total - 5)
+        last = None
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            last = frame
+        if last is None:  # seek falló: releer desde el principio
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                last = frame
+        if last is None:
+            raise RuntimeError(f"El vídeo no tiene frames legibles: {path}")
+        return last
+    finally:
+        cap.release()
+
+
+def save_last_frame(path: str, out_image: str) -> str:
+    """Extrae el último frame y lo guarda como imagen. Devuelve la ruta."""
+    frame = last_frame(path)
+    Path(out_image).parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(out_image), frame):
+        raise RuntimeError(f"No se pudo escribir el frame en {out_image}")
+    return str(out_image)
+
+
+def concat_videos(paths: List[str], output: str, *, drop_seam: bool = True,
+                  crf: int = 18, encoder: str = "libx264") -> bool:
+    """Concatena varios clips en uno solo (para *Extender/Encadenar vídeo*).
+
+    ``drop_seam``: en un encadenado, el frame 0 de cada clip a partir del 2º es la
+    imagen de arranque = el ÚLTIMO frame del clip anterior (duplicado). Con
+    ``drop_seam`` se descarta ese frame repetido para que la unión no "congele" un
+    frame. Reescala todos los clips al tamaño del primero (defensivo) y reencoda a
+    H.264. Devuelve True si tuvo éxito. No mezcla audio (video-only): el audio del
+    resultado se genera aparte sobre el clip final.
+    """
+    paths = [str(p) for p in paths if p]
+    if not paths:
+        return False
+    if len(paths) == 1:
+        # Nada que concatenar: copia tal cual.
+        try:
+            import shutil
+            shutil.copyfile(paths[0], str(output))
+            return True
+        except Exception as exc:  # pragma: no cover
+            log.warning("No se pudo copiar el clip único: %s", exc)
+            return False
+    ff = ffmpeg_path()
+    if not ff:
+        log.warning("FFmpeg no disponible: no se puede concatenar.")
+        return False
+    info0 = probe(paths[0])
+    w = info0.width - (info0.width % 2)
+    h = info0.height - (info0.height % 2)
+    if w <= 0 or h <= 0:
+        log.warning("concat: dimensiones inválidas del primer clip (%sx%s).",
+                    info0.width, info0.height)
+        return False
+    labels, filters = [], []
+    for i, path in enumerate(paths):
+        # Recorta el frame de enlace SOLO si el clip tiene ≥2 frames: si tuviera 1
+        # (render truncado), trim=start_frame=1 lo dejaría vacío y desaparecería sin
+        # aviso. Escala con letterbox (decrease+pad), no estirando, por si algún clip
+        # llegara con otro aspecto (los callers normales ya vienen todos iguales).
+        do_trim = drop_seam and i > 0
+        if do_trim:
+            try:
+                if probe(path).frame_count < 2:
+                    do_trim = False
+            except Exception:
+                do_trim = False
+        trim = "trim=start_frame=1," if do_trim else ""
+        filters.append(
+            f"[{i}:v]{trim}scale={w}:{h}:force_original_aspect_ratio=decrease,"
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS[v{i}]"
+        )
+        labels.append(f"[v{i}]")
+    filter_complex = ";".join(filters) + ";" + "".join(labels) + \
+        f"concat=n={len(paths)}:v=1:a=0[out]"
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error"]
+    for p in paths:
+        cmd += ["-i", p]
+    cmd += ["-filter_complex", filter_complex, "-map", "[out]",
+            "-c:v", encoder, "-crf", str(crf), "-pix_fmt", "yuv420p", str(output)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return True
+    except subprocess.CalledProcessError as exc:  # pragma: no cover
+        err = (exc.stderr or b"").decode("utf-8", "ignore")
+        log.warning("Falló la concatenación de vídeo: %s", err[:500])
+        return False
+    except Exception as exc:  # pragma: no cover
+        log.warning("Falló la concatenación de vídeo: %s", exc)
+        return False
+
+
 def mux_external_audio(video: str, audio: str, output: str) -> bool:
     """Mezcla una pista de audio EXTERNA (wav/flac/mp3) sobre un vídeo.
 

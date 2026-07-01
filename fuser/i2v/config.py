@@ -80,31 +80,44 @@ OFFLOAD_BALANCED = "balanced_8gb"
 OFFLOAD_MAX = "max_offload"
 OFFLOAD_PERFORMANCE = "performance"
 
+# El preset ES el selector de modelo/workflow en 8 GB. Cada preset fija el
+# workflow, los GGUF (high/low) y el VAE que le corresponden, para que elegir el
+# preset baste (sin que el usuario tenga que teclear nombres de modelo).
+_M5B = "Wan2.2-TI2V-5B-Q4_K_M.gguf"
+_M14B_HIGH = "Wan2.2-I2V-A14B-HighNoise-Q3_K_S.gguf"
+_M14B_LOW = "Wan2.2-I2V-A14B-LowNoise-Q3_K_S.gguf"
+
 OFFLOAD_PRESETS: Dict[str, dict] = {
-    # Equilibrado: lo más estable para 8 GB. GGUF Q4_K_M + --lowvram. La smart
-    # memory de ComfyUI descarga sola lo que no cabe.
+    # Equilibrado: lo más estable para 8 GB. Modelo 5B (cabe entero) + VAE 2.2.
     OFFLOAD_BALANCED: dict(
         workflow=WF_WAN22_TI2V_5B,
+        high_model=_M5B, low_model=_M5B, vae="wan2.2_vae.safetensors",
         comfy_flags=["--reserve-vram", "0.4"],
         virtual_vram_gb=0.0,   # no aplica (el 5B cabe entero)
         note="Recomendado para 8 GB. Modelo 5B (cabe entero en VRAM, ~3 min/clip) con el "
              "codificador de texto en CPU. ⚠️ NO uses --lowvram con el 5B (lo frena 50×) y "
              "CIERRA la app de face-swap mientras generas (comparten los 8 GB).",
     ),
-    # Offload máximo: usa ComfyUI-MultiGPU (DisTorch2) para empujar capas a la
-    # RAM de forma explícita. Más lento pero el que menos peta en 8 GB.
+    # Offload máximo: 14B dual-experto en GGUF puro + arranque de ComfyUI con
+    # --lowvram (offload nativo de ComfyUI a RAM). Usa el cargador UnetLoaderGGUF
+    # (siempre instalado). El DisTorch2 (WF_WAN22_I2V_DISTORCH) daría un offload más
+    # fino pero necesita el custom node ComfyUI-MultiGPU, que NO está instalado aquí.
     OFFLOAD_MAX: dict(
-        workflow=WF_WAN22_I2V_DISTORCH,
+        workflow=WF_WAN22_I2V_GGUF,
+        high_model=_M14B_HIGH, low_model=_M14B_LOW, vae="wan_2.1_vae.safetensors",
         comfy_flags=["--lowvram", "--reserve-vram", "0.8"],
-        virtual_vram_gb=6.0,   # cuántos GB "tomar prestados" de la RAM por modelo
-        note="Máxima estabilidad en 8 GB: DisTorch2 mueve ~6 GB de pesos a la RAM por experto.",
+        virtual_vram_gb=0.0,   # DisTorch no disponible → sin virtual_vram
+        note="Máxima fidelidad en 8 GB: 14B dual-experto (GGUF). Arranca ComfyUI con --lowvram "
+             "para que empuje pesos a la RAM. Bastante más lento que el 5B, pero pega mejor la "
+             "identidad. (Para offload DisTorch2 más fino: instala el custom node ComfyUI-MultiGPU.)",
     ),
-    # Rendimiento: para quien tenga algo más de margen (deja más en VRAM).
+    # Rendimiento: 14B GGUF puro (deja más en VRAM). Para quien tenga algo de margen.
     OFFLOAD_PERFORMANCE: dict(
         workflow=WF_WAN22_I2V_GGUF,
+        high_model=_M14B_HIGH, low_model=_M14B_LOW, vae="wan_2.1_vae.safetensors",
         comfy_flags=["--reserve-vram", "0.5"],
         virtual_vram_gb=0.0,
-        note="Más rápido pero más arriesgado en 8 GB; ideal si tienes 10-12 GB.",
+        note="14B a máxima calidad pero más arriesgado en 8 GB; ideal si tienes 10-12 GB.",
     ),
 }
 
@@ -136,35 +149,55 @@ def bucket_for_image(image_path, short: int = 480, cap: int = 832) -> tuple:
     *center-crop* de la imagen para llenar el marco objetivo. Si el marco no coincide
     con el aspecto de la foto (p.ej. foto vertical en un objetivo 640×480 apaisado),
     Wan se queda con una tira central y ALUCINA el resto. Derivando el marco del
-    aspecto de la imagen (lado corto ≈480, lado largo tope 832, múltiplos de 16) el
-    recorte es mínimo y la imagen se conserva.
+    aspecto de la imagen (lado corto ≈480, lado largo tope 832, múltiplos de 32) el
+    recorte es mínimo y la imagen se conserva. Múltiplos de 32 porque
+    ``Wan22ImageToVideoLatent`` (el nodo del 5B) exige width/height con step 32.
     """
+    # Fallback si no se puede leer la imagen: CUADRADO (no apaisado). Para un
+    # aspecto desconocido, un marco cuadrado minimiza el center-crop; forzar
+    # 832×480 apaisado reintroduciría justo el bug que esta función evita.
     try:
         import cv2
         im = cv2.imread(str(image_path))
         if im is None:
-            return 832, 480
+            return 640, 640
         h, w = im.shape[:2]
         ar = w / max(1.0, h)
         if ar >= 1.0:
             hh, ww = short, min(cap, short * ar)
         else:
             ww, hh = short, min(cap, short / ar)
-        snap = lambda x: max(320, int(round(x / 16) * 16))
+        snap = lambda x: max(320, int(round(x / 32) * 32))   # 320 = 10*32
         return snap(ww), snap(hh)
     except Exception:
-        return 832, 480
+        return 640, 640
 
 # Wan 2.2 trabaja a 16 fps. La longitud debe ser 4n+1 frames.
 #   97 frames / 16 fps = 6.06 s  (≈ los 6 s pedidos)
+# Duración POR CLIP. Tope 7 s: una sola pasada más larga se queda sin VRAM en el
+# VAE en 8 GB (comprobado). Para vídeos de ~10 s o más, ENCADENÁ clips cortos con
+# "🔗 Clips a encadenar" o el botón "➕ Extender" (vía fiable, sin petar el VAE).
 DURATION_CHOICES = [
     ("≈2 s (33 frames) — rápido, recomendado en 8 GB", 33),
     ("≈3 s (49 frames)", 49),
     ("≈4 s (65 frames)", 65),
     ("≈5 s (81 frames)", 81),
     ("≈6 s (97 frames)", 97),
-    ("≈7 s (113 frames)", 113),
+    ("≈7 s (113 frames) — máx. de una sola pasada; para más, encadená clips", 113),
 ]
+
+# Tope de frames por clip (una sola pasada) en 8 GB. Por encima, mejor encadenar.
+MAX_SINGLE_LENGTH_FRAMES = 113
+# Máximo de clips a encadenar (fuente única para el slider de la UI y el clamp).
+MAX_N_CLIPS = 5
+
+
+def snap_length_4nplus1(frames: int) -> int:
+    """Redondea a un valor válido de Wan (4n+1) y lo acota a [5, tope por clip]."""
+    frames = int(frames)
+    n = max(1, round((frames - 1) / 4))
+    val = 4 * n + 1
+    return max(5, min(MAX_SINGLE_LENGTH_FRAMES, val))
 
 SAMPLER_CHOICES = ["euler", "euler_ancestral", "dpmpp_2m", "uni_pc", "lcm"]
 SCHEDULER_CHOICES = ["simple", "normal", "beta", "ddim_uniform", "karras"]
@@ -206,12 +239,13 @@ class I2VSettings:
     virtual_vram_gb: float = 0.0            # se deriva del preset (solo DisTorch2)
 
     # --- Modelos (tal y como se llaman DENTRO de ComfyUI) ---
-    # Defaults = modelo 5B + VAE 2.2 (lo que usa el workflow por defecto). Para el
-    # 14B se cambian en la UI (avanzado) a los GGUF HighNoise/LowNoise + VAE 2.1.
-    high_noise_model: str = "Wan2.2-TI2V-5B-Q4_K_M.gguf"
-    low_noise_model: str = "Wan2.2-TI2V-5B-Q4_K_M.gguf"
+    # VACÍO = automático según el preset de offload (5B para Equilibrado, 14B para
+    # Offload máx / Rendimiento). Si escribes un nombre a mano (UI avanzada) ese
+    # override manda. Ver ``resolved()``.
+    high_noise_model: str = ""
+    low_noise_model: str = ""
     text_encoder: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
-    vae: str = "wan2.2_vae.safetensors"
+    vae: str = ""
 
     # --- Generación de vídeo ---
     width: int = 512
@@ -226,6 +260,10 @@ class I2VSettings:
     scheduler: str = "simple"
     shift: float = 8.0
     seed: int = -1                         # -1 = aleatoria
+    # Encadenado: >1 genera varios clips seguidos (último frame -> arranque del
+    # siguiente) y los une. En 8 GB es la vía FIABLE para ~10 s (una sola pasada
+    # larga suele petar el VAE). Lo usan tanto "Generar" como "Extender".
+    n_clips: int = 1
 
     # --- Audio (segundo paso, modelo aparte) ---
     # ON: Stable Audio Open ya está instalado (checkpoint de Comfy-Org, no-gated) +
@@ -240,16 +278,25 @@ class I2VSettings:
     audio_seed: int = -1
 
     def resolved(self) -> "I2VSettings":
-        """Rellena ``workflow`` y ``virtual_vram_gb`` desde el preset de offload."""
+        """Deriva workflow + modelos + VAE + offload desde el preset de offload.
+
+        El preset es el SELECTOR: Equilibrado→5B, Offload máx→14B DisTorch2,
+        Rendimiento→14B GGUF. Los campos de modelo/VAE vacíos se rellenan desde el
+        preset; si el usuario tecleó un nombre a mano (UI avanzada) ese override
+        manda (permite exportar/usar otros GGUF sin tocar el código).
+        """
         out = I2VSettings(**asdict(self))
         preset = OFFLOAD_PRESETS.get(self.offload_preset, OFFLOAD_PRESETS[OFFLOAD_BALANCED])
-        # Solo derivamos si el usuario no los fijó a mano.
-        if out.workflow == WF_WAN22_I2V_GGUF and self.offload_preset != OFFLOAD_BALANCED:
-            out.workflow = preset["workflow"]
+        out.workflow = preset["workflow"]
+        out.high_noise_model = (self.high_noise_model or "").strip() or preset["high_model"]
+        out.low_noise_model = (self.low_noise_model or "").strip() or preset["low_model"]
+        out.vae = (self.vae or "").strip() or preset.get("vae", "wan2.2_vae.safetensors")
         if out.virtual_vram_gb <= 0:
             out.virtual_vram_gb = float(preset["virtual_vram_gb"])
+        # Audio: pide un pelín MÁS que el vídeo para que el mux con -shortest
+        # recorte el AUDIO, nunca el vídeo (si no, se pierde la cola del clip).
         if out.audio_seconds <= 0:
-            out.audio_seconds = round(out.length_frames / max(1, out.fps), 1)
+            out.audio_seconds = round(out.length_frames / max(1, out.fps) + 0.2, 2)
         return out
 
     @property

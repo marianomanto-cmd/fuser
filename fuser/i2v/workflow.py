@@ -170,8 +170,9 @@ def patch_i2v(graph: Graph, *, image: str, positive: str, negative: str,
     if neg_id:
         _set(g[neg_id], "text", negative)
 
-    # Tamaño / longitud del vídeo.
-    for _, node in find_by_class(g, "WanImageToVideo"):
+    # Tamaño / longitud del vídeo. Cubre ambos nodos de conditioning de imagen:
+    # WanImageToVideo (14B/A14B) y Wan22ImageToVideoLatent (TI2V-5B).
+    for _, node in find_by_class(g, "WanImageToVideo", "Wan22ImageToVideoLatent"):
         _set(node, "width", int(width))
         _set(node, "height", int(height))
         _set(node, "length", int(length))

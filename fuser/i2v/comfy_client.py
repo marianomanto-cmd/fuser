@@ -52,6 +52,40 @@ class ComfyUINotAvailable(ComfyUIError):
         self.url = url
 
 
+def _summarize_comfy_error(body: str) -> str:
+    """Extrae un motivo legible del cuerpo de error de ``/prompt`` (HTTP 400).
+
+    ComfyUI devuelve JSON con ``error`` y/o ``node_errors``; de ahí sacamos qué
+    nodo/valor falló (p.ej. un custom node no instalado) para decírselo al usuario
+    en vez de un genérico "ComfyUI no responde".
+    """
+    if not body:
+        return ""
+    try:
+        d = json.loads(body)
+    except Exception:
+        return body.strip()[:300]
+    parts: List[str] = []
+    err = d.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("type") or ""
+        det = err.get("details") or ""
+        parts.append((f"{msg} — {det}" if det else msg).strip())
+    for nid, ne in list((d.get("node_errors") or {}).items())[:4]:
+        ct = (ne or {}).get("class_type", "")
+        emsgs = "; ".join(
+            (e.get("message", "") + (f" ({e.get('details')})" if e.get("details") else "")).strip()
+            for e in ((ne or {}).get("errors") or []) if isinstance(e, dict)
+        )
+        parts.append(f"nodo {nid} [{ct}]: {emsgs}".strip(": "))
+    out = " | ".join(p for p in parts if p).strip()
+    if ("does not exist" in out.lower() or "not in list" in out.lower()
+            or "cannot execute" in out.lower()):
+        out += "  → parece faltar un custom node o un modelo; míralo en el botón "
+        out += "'🔌 Comprobar ComfyUI' de la pestaña."
+    return out[:500] if out else body.strip()[:300]
+
+
 @dataclass
 class OutputFile:
     """Un fichero producido por el workflow (vídeo, imagen o audio)."""
@@ -86,7 +120,21 @@ class ComfyUIClient:
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 return resp.read()
+        except urllib.error.HTTPError as exc:
+            # El servidor RESPONDE pero rechaza la petición (400 = workflow inválido,
+            # p.ej. falta un custom node). NO es "ComfyUI caído": propaga el motivo
+            # real para no mandar al usuario a rearrancar ComfyUI en vano.
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            detail = _summarize_comfy_error(body) or str(getattr(exc, "reason", "") or "")
+            raise ComfyUIError(
+                f"ComfyUI rechazó la petición ({exc.code} {exc.reason}) en {path}. {detail}".strip()
+            ) from exc
         except urllib.error.URLError as exc:
+            # Sin servidor escuchando / conexión rechazada: ahí sí, ComfyUI no está.
             raise ComfyUINotAvailable(self.base_url, str(getattr(exc, "reason", exc))) from exc
 
     def _get_json(self, path: str, query: Optional[dict] = None) -> dict:

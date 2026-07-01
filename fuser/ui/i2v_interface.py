@@ -31,7 +31,7 @@ def _parse_resolution(value: str) -> tuple[int, int]:
 
 
 def _build_settings(
-    comfy_url, offload_preset, resolution, length_frames, steps, cfg, shift, seed,
+    comfy_url, offload_preset, resolution, length_frames, n_clips, steps, cfg, shift, seed,
     sampler, scheduler, high_model, low_model, text_encoder, vae,
     audio_enabled, audio_prompt, audio_steps, audio_cfg, negative,
 ) -> i2vcfg.I2VSettings:
@@ -40,7 +40,8 @@ def _build_settings(
         comfy_url=(comfy_url or i2vcfg.DEFAULT_COMFY_URL).strip(),
         offload_preset=offload_preset,
         width=w, height=h,
-        length_frames=int(length_frames),
+        length_frames=i2vcfg.snap_length_4nplus1(length_frames),
+        n_clips=int(n_clips),
         steps=int(steps), cfg=float(cfg), shift=float(shift), seed=int(seed),
         sampler=sampler, scheduler=scheduler,
         high_noise_model=(high_model or "").strip(),
@@ -99,10 +100,52 @@ def _on_generate(image, prompt, negative, *control_values, progress=gr.Progress(
         log.exception("Error en Imagen → Vídeo")
         raise gr.Error(f"Error al generar: {exc}")
 
-    audio_txt = "con audio 🔊" if result["has_audio"] else "sin audio (no se pudo generar)"
+    audio_txt = "con audio 🔊" if result["has_audio"] else "sin audio"
     status = (f"✅ ¡Vídeo generado! {result['resolution']} · ~{result['seconds']} s · {audio_txt}.  "
-              "Descárgalo abajo.")
-    return result["video"], result["video"], status
+              "Descárgalo, o pulsa **➕ Extender** para continuarlo.")
+    if result.get("note"):
+        status += f"  ⚠️ {result['note']}"
+    return result["video"], result["video"], status, result["video"]
+
+
+def _on_extend(base_video, prompt, negative, *control_values, progress=gr.Progress()):
+    """Continúa el ÚLTIMO vídeo generado: su último frame arranca clips nuevos que
+    se pegan detrás. ``base_video`` viene del gr.State con la última salida."""
+    if not base_video:
+        raise gr.Error("Primero generá un vídeo; después podés extenderlo.")
+    if not (prompt or "").strip():
+        raise gr.Error("Escribe un prompt para la continuación (describe el movimiento).")
+    settings = _build_settings(*control_values, negative)
+    service = I2VService(settings)
+
+    def cb(frac, msg=""):
+        progress(frac, desc=msg)
+
+    try:
+        from .interface import free_swap_vram
+        free_swap_vram()
+    except Exception:  # pragma: no cover
+        pass
+
+    try:
+        progress(0.0, desc="Extendiendo el vídeo…")
+        result = service.extend(base_video, prompt, negative, progress=cb)
+    except ComfyUINotAvailable as exc:
+        raise gr.Error(str(exc))
+    except I2VGenerationError as exc:
+        raise gr.Error(str(exc))
+    except gr.Error:
+        raise
+    except Exception as exc:  # pragma: no cover
+        log.exception("Error al extender Imagen → Vídeo")
+        raise gr.Error(f"Error al extender: {exc}")
+
+    audio_txt = "con audio 🔊" if result["has_audio"] else "sin audio"
+    status = (f"✅ ¡Vídeo extendido! {result['resolution']} · ~{result['seconds']} s · {audio_txt}.  "
+              "Podés seguir pulsando **➕ Extender** para alargarlo más.")
+    if result.get("note"):
+        status += f"  ⚠️ {result['note']}"
+    return result["video"], result["video"], status, result["video"]
 
 
 def _on_offload_change(offload_preset: str) -> str:
@@ -170,8 +213,14 @@ def build_i2v_tab() -> None:
                  "escena). Solo fijá una manual si sabés lo que hacés.",
         )
         duration = gr.Dropdown(
-            choices=i2vcfg.DURATION_CHOICES, value=33, label="⏱️ Duración",
-            info="A 16 fps. Menos frames = mucho más rápido y menos VRAM. 33 ≈ 2 s.",
+            choices=i2vcfg.DURATION_CHOICES, value=33, label="⏱️ Duración (por clip)",
+            info="A 16 fps. Menos frames = mucho más rápido y menos VRAM. 33 ≈ 2 s. "
+                 "En 8 GB, ≥8 s en una sola pasada suele petar: mejor encadená clips →",
+        )
+        n_clips = gr.Slider(
+            1, i2vcfg.MAX_N_CLIPS, value=1, step=1, label="🔗 Clips a encadenar",
+            info="1 = un solo clip. >1 encadena clips (último frame → arranque del "
+                 "siguiente) para vídeos largos SIN petar el VAE. Ej.: 3 clips de 3 s ≈ 9 s.",
         )
 
     comfy_cmd_md = gr.Markdown(_on_offload_change(i2vcfg.OFFLOAD_BALANCED))
@@ -213,18 +262,19 @@ def build_i2v_tab() -> None:
         comfy_url = gr.Textbox(value=i2vcfg.DEFAULT_COMFY_URL, label="URL de ComfyUI",
                                info="Donde escucha tu ComfyUI. Por defecto http://127.0.0.1:8188.")
         gr.Markdown(f"_{i2vcfg.QUANT_NOTE}_")
-        gr.Markdown("_Default = modelo **5B** (`wan22_ti2v_5b`, rápido). Para el 14B (lento, "
-                    "más calidad) cambiá el **preset de Offload** a uno 14B y poné los GGUF "
-                    "`Wan2.2-I2V-A14B-{High,Low}Noise-Q3_K_S.gguf` + VAE `wan_2.1_vae`._")
+        gr.Markdown("_El **modelo se elige con el preset de Offload** de arriba: Equilibrado→5B, "
+                    "Offload máx / Rendimiento→14B (más fidelidad, más lento). Deja estos campos "
+                    "**vacíos** para automático; solo escribe un nombre si quieres forzar otro GGUF._")
         with gr.Row():
-            high_model = gr.Textbox(value="Wan2.2-TI2V-5B-Q4_K_M.gguf",
-                                    label="Modelo (GGUF) — 5B usa el mismo en ambos")
-            low_model = gr.Textbox(value="Wan2.2-TI2V-5B-Q4_K_M.gguf",
-                                   label="Modelo experto BAJO ruido (solo 14B)")
+            high_model = gr.Textbox(value="", placeholder="(vacío = automático según el preset)",
+                                    label="Modelo GGUF — override (experto ALTO ruido)")
+            low_model = gr.Textbox(value="", placeholder="(vacío = automático según el preset)",
+                                   label="Modelo GGUF — override (experto BAJO ruido, solo 14B)")
         with gr.Row():
             text_encoder = gr.Textbox(value="umt5_xxl_fp8_e4m3fn_scaled.safetensors",
                                       label="Codificador de texto (UMT5)")
-            vae = gr.Textbox(value="wan2.2_vae.safetensors", label="VAE (5B=2.2, 14B=2.1)")
+            vae = gr.Textbox(value="", placeholder="(vacío = automático según el preset)",
+                             label="VAE — override (5B=2.2, 14B=2.1)")
 
     generate_btn = gr.Button("🎬 Generar vídeo", variant="primary")
     gen_status = gr.Markdown("")
@@ -232,12 +282,30 @@ def build_i2v_tab() -> None:
         video_out = gr.Video(label="🎉 Resultado")
         file_out = gr.File(label="⬇️ Descargar vídeo")
 
+    # Guarda la ruta del último vídeo para poder EXTENDERLO.
+    last_video = gr.State(value=None)
+    with gr.Row():
+        extend_btn = gr.Button("➕ Extender (continuar desde el último frame)",
+                               variant="secondary")
+    gr.Markdown(
+        "_**Extender**: toma el ÚLTIMO frame del vídeo de arriba y genera su continuación "
+        "(usa el prompt y los ajustes actuales, más **🔗 Clips a encadenar**) y la pega "
+        "detrás. Pulsalo varias veces para alargar más. Puede haber leve **deriva de color** "
+        "clip a clip (limitación conocida de Wan)._"
+    )
+
     # ----- Orden EXACTO de controles (debe coincidir con _build_settings) -----
     controls = [
-        comfy_url, offload_preset, resolution, duration, steps, cfg, shift, seed,
+        comfy_url, offload_preset, resolution, duration, n_clips, steps, cfg, shift, seed,
         sampler, scheduler, high_model, low_model, text_encoder, vae,
         audio_enabled, audio_prompt, audio_steps, audio_cfg,
     ]
+    # Falla RUIDOSAMENTE al construir la UI si controls y _build_settings se
+    # desalinean (evita mapear en silencio steps->cfg, etc. al reordenar uno solo).
+    import inspect as _inspect
+    assert len(controls) + 1 == len(_inspect.signature(_build_settings).parameters), (
+        "i2v: 'controls' y '_build_settings' desalineados (revisa orden/número)."
+    )
 
     # ----- Wiring -----
     check_btn.click(_on_check, inputs=[comfy_url, offload_preset, audio_enabled],
@@ -246,7 +314,12 @@ def build_i2v_tab() -> None:
     generate_btn.click(
         _on_generate,
         inputs=[image_in, prompt, negative, *controls],
-        outputs=[video_out, file_out, gen_status],
+        outputs=[video_out, file_out, gen_status, last_video],
+    )
+    extend_btn.click(
+        _on_extend,
+        inputs=[last_video, prompt, negative, *controls],
+        outputs=[video_out, file_out, gen_status, last_video],
     )
 
     gr.Markdown(
