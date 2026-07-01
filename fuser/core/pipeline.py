@@ -177,9 +177,18 @@ class SwapPipeline:
         finally:
             writer.close()
 
-        # Segunda pasada opcional: detecta frames defectuosos y los corrige.
+        # Segunda pasada opcional: detecta frames defectuosos y los corrige. Una falla
+        # aquí NO debe perder el vídeo ya renderizado (degradamos al sin-corregir).
         if self.settings.qc_second_pass:
-            tmp_video = Path(self._run_qc_pass(video_path, tmp_video, info, progress))
+            pre_qc = tmp_video
+            try:
+                corrected = Path(self._run_qc_pass(video_path, tmp_video, info, progress))
+                if corrected != pre_qc:
+                    tmp_video = corrected
+                    pre_qc.unlink(missing_ok=True)   # limpia el temporal pre-corrección
+            except Exception as exc:  # pragma: no cover
+                log.warning("QC 2ª pasada falló (%s); entrego el vídeo sin corregir.", exc)
+                tmp_video = pre_qc
 
         return self._finalize(tmp_video, video_path, info, final_out, processed, progress)
 
