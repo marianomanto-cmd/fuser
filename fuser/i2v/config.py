@@ -98,18 +98,19 @@ OFFLOAD_PRESETS: Dict[str, dict] = {
              "codificador de texto en CPU. ⚠️ NO uses --lowvram con el 5B (lo frena 50×) y "
              "CIERRA la app de face-swap mientras generas (comparten los 8 GB).",
     ),
-    # Offload máximo: 14B dual-experto en GGUF puro + arranque de ComfyUI con
-    # --lowvram (offload nativo de ComfyUI a RAM). Usa el cargador UnetLoaderGGUF
-    # (siempre instalado). El DisTorch2 (WF_WAN22_I2V_DISTORCH) daría un offload más
-    # fino pero necesita el custom node ComfyUI-MultiGPU, que NO está instalado aquí.
+    # Offload máximo: 14B dual-experto con DisTorch2 (custom node ComfyUI-MultiGPU),
+    # que fija explícitamente cuántos GB de pesos van a la RAM (virtual_vram_gb).
+    # Es el offload RÁPIDO: reparte una vez, sin el vaivén síncrono de --lowvram
+    # (que medimos hasta 50× más lento). Si el nodo no está instalado (o ComfyUI no
+    # se reinició tras instalarlo), el servicio CAE SOLO al 14B GGUF estándar.
     OFFLOAD_MAX: dict(
-        workflow=WF_WAN22_I2V_GGUF,
+        workflow=WF_WAN22_I2V_DISTORCH,
         high_model=_M14B_HIGH, low_model=_M14B_LOW, vae="wan_2.1_vae.safetensors",
-        comfy_flags=["--lowvram", "--reserve-vram", "0.8"],
-        virtual_vram_gb=0.0,   # DisTorch no disponible → sin virtual_vram
-        note="Máxima fidelidad en 8 GB: 14B dual-experto (GGUF). Arranca ComfyUI con --lowvram "
-             "para que empuje pesos a la RAM. Bastante más lento que el 5B, pero pega mejor la "
-             "identidad. (Para offload DisTorch2 más fino: instala el custom node ComfyUI-MultiGPU.)",
+        comfy_flags=["--reserve-vram", "0.8"],   # SIN --lowvram: DisTorch2 ya coloca los pesos
+        virtual_vram_gb=6.0,   # GB de pesos por experto que viven en RAM (40 GB disponibles)
+        note="Máxima fidelidad en 8 GB: 14B dual-experto + DisTorch2 (~6 GB de pesos por experto "
+             "en RAM, colocado una sola vez → mucho más rápido que --lowvram). Requiere el custom "
+             "node ComfyUI-MultiGPU; si falta, se usa el 14B GGUF estándar automáticamente.",
     ),
     # Rendimiento: 14B GGUF puro (deja más en VRAM). Para quien tenga algo de margen.
     OFFLOAD_PERFORMANCE: dict(
@@ -202,6 +203,44 @@ def snap_length_4nplus1(frames: int) -> int:
 SAMPLER_CHOICES = ["euler", "euler_ancestral", "dpmpp_2m", "uni_pc", "lcm"]
 SCHEDULER_CHOICES = ["simple", "normal", "beta", "ddim_uniform", "karras"]
 
+# ----------------------------------------------------------------------------
+# "Boost" de prompt (adherencia)
+# ----------------------------------------------------------------------------
+# Réplica determinista del "prompt extension" oficial de Wan (que usa un LLM):
+# las reglas oficiales para i2v son: solo contenido DINÁMICO (la imagen ya pone
+# la escena), frases naturales en inglés, ≤100 palabras, y respetar las frases
+# de cámara del usuario tal cual. Las etiquetas de calidad ("masterpiece…") NO
+# forman parte del estilo oficial — lo que rinde es describir el movimiento.
+_CAMERA_WORDS = (
+    "camera", "pan", "zoom", "push", "pull", "dolly", "orbit", "tracking",
+    "tilt", "crane", "handheld", "pov",
+    # español (por si el usuario escribe la cámara en castellano)
+    "cámara", "camara", "paneo", "acercamiento", "alejamiento", "travelling", "plano",
+)
+
+
+def boost_prompt(prompt: str) -> str:
+    """Completa el prompt al estilo del *prompt extension* oficial (sin LLM).
+
+    - Si el usuario no dijo nada de cámara, fija "The camera remains static."
+      (evita que Wan invente movimientos de cámara y estabiliza la identidad).
+    - Añade movimiento secundario natural (respiración/parpadeo) si no lo hay.
+    - Cierra con una frase corta de consistencia temporal (anti-morphing).
+    """
+    p = (prompt or "").strip()
+    if not p:
+        return p
+    low = p.lower()
+    if "temporally consistent" in low:   # ya está potenciado (idempotente)
+        return p
+    add = []
+    if not any(w in low for w in _CAMERA_WORDS):
+        add.append("The camera remains static.")
+    if not any(w in low for w in ("breath", "blink", "hair sway", "idle")):
+        add.append("Subtle natural secondary motion: gentle breathing and natural blinks.")
+    add.append("Smooth, temporally consistent motion with coherent anatomy.")
+    return p.rstrip(" .;,") + ". " + " ".join(add)
+
 QUANT_NOTE = (
     "GGUF Q4_K_M (~9.6 GB por experto) es el mejor equilibrio para 8 GB. "
     "Si te sigue faltando memoria, baja a Q3_K_M; si te sobra RAM y quieres más "
@@ -252,10 +291,13 @@ class I2VSettings:
     height: int = 384
     length_frames: int = 33                # 4n+1 ; 33 ≈ 2 s a 16 fps (rápido; subí a 49/81)
     fps: int = 16
-    # 5B sin LoRA distill: 16 pasos, sampler uni_pc, shift 8. cfg BAJO (3.5) para que
-    # NO se vaya hacia el prompt e ignore la imagen (cfg alto = más texto, menos foto).
-    steps: int = 16
-    cfg: float = 3.5
+    # 5B sin LoRA distill: valores de la plantilla OFICIAL del 5B (cfg 5.0, 20 pasos,
+    # uni_pc, shift 8). Usamos cfg 4.5: la identidad ya la ancla el latente
+    # (Wan22ImageToVideoLatent), así que el cfg compra ADHERENCIA al prompt; por
+    # encima de ~6 el riesgo es sobresaturación ("quemado"), no perder la cara.
+    # Si se ve quemado bajá a 3.5; si ignora el prompt subí a 5.
+    steps: int = 20
+    cfg: float = 4.5
     sampler: str = "uni_pc"
     scheduler: str = "simple"
     shift: float = 8.0
@@ -264,6 +306,9 @@ class I2VSettings:
     # siguiente) y los une. En 8 GB es la vía FIABLE para ~10 s (una sola pasada
     # larga suele petar el VAE). Lo usan tanto "Generar" como "Extender".
     n_clips: int = 1
+    # Boost de prompt: añade descriptores de calidad/movimiento (inglés, estilo
+    # Wan) al final del prompt para mejorar la adherencia sin cambiar la escena.
+    prompt_boost: bool = True
 
     # --- Audio (segundo paso, modelo aparte) ---
     # ON: Stable Audio Open ya está instalado (checkpoint de Comfy-Org, no-gated) +

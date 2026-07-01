@@ -33,7 +33,7 @@ def _parse_resolution(value: str) -> tuple[int, int]:
 def _build_settings(
     comfy_url, offload_preset, resolution, length_frames, n_clips, steps, cfg, shift, seed,
     sampler, scheduler, high_model, low_model, text_encoder, vae,
-    audio_enabled, audio_prompt, audio_steps, audio_cfg, negative,
+    audio_enabled, audio_prompt, audio_steps, audio_cfg, prompt_boost, negative,
 ) -> i2vcfg.I2VSettings:
     w, h = _parse_resolution(resolution)
     return i2vcfg.I2VSettings(
@@ -51,6 +51,7 @@ def _build_settings(
         audio_enabled=bool(audio_enabled),
         audio_prompt=(audio_prompt or "").strip(),
         audio_steps=int(audio_steps), audio_cfg=float(audio_cfg),
+        prompt_boost=bool(prompt_boost),
     )
 
 
@@ -173,8 +174,12 @@ pero es mucho más lento.
 > Arrancá ComfyUI con `--reserve-vram 0.4` (NO `--lowvram`).
 >
 > ⚙️ **Requiere ComfyUI arrancado** (proceso aparte). Pulsá **🔌 Comprobar ComfyUI**.
-> Describí **el MOVIMIENTO y la cámara** (la imagen ya define la apariencia): *"slow
-> push-in, gentle breeze, subtle breathing"*. Guía: [`docs/IMAGE_TO_VIDEO.md`](https://github.com/marianomanto-cmd/fuser/blob/main/docs/IMAGE_TO_VIDEO.md).
+> Describí **el MOVIMIENTO y la cámara** (la imagen ya define la apariencia), **en
+> inglés** y con **UNA acción por clip**: *"she walks toward the camera at a relaxed
+> pace"*. Para secuencias ("sonríe, luego saluda") **encadená clips** con `||` o el
+> botón **➕ Extender**. El 5B no sigue bien: varias acciones seguidas, cámara +
+> sujeto moviéndose a la vez, acción rápida, o varias personas interactuando — para
+> eso usá el **14B** (preset de Offload). Guía: [`docs/IMAGE_TO_VIDEO.md`](https://github.com/marianomanto-cmd/fuser/blob/main/docs/IMAGE_TO_VIDEO.md).
 >
 > ⚠️ **Uso responsable:** solo con consentimiento, sin suplantar a personas reales.
 """
@@ -192,7 +197,13 @@ def build_i2v_tab() -> None:
                 placeholder="Ej.: she turns her head slowly and smiles, gentle breeze in her hair, "
                             "slow push-in  ·  (describe el MOVIMIENTO/cámara, no otra escena)",
                 info="La imagen YA define la apariencia: describí solo cómo se MUEVE (y quién es). "
-                     "Si describís una escena distinta, Wan puede inventarla. En inglés rinde mejor.",
+                     "EN INGLÉS rinde bastante mejor. Con varios clips encadenados podés dar un "
+                     "prompt POR CLIP separando con ||  (ej.: she smiles || she waves).",
+            )
+            prompt_boost = gr.Checkbox(
+                value=True, label="✨ Potenciar prompt (recomendado)",
+                info="Añade descriptores de calidad/movimiento al estilo del 'prompt extension' "
+                     "oficial de Wan. Mejora adherencia y estabilidad sin cambiar tu escena.",
             )
             negative = gr.Textbox(
                 label="🚫 Prompt negativo", value=i2vcfg.WAN_DEFAULT_NEGATIVE, lines=2,
@@ -220,7 +231,8 @@ def build_i2v_tab() -> None:
         n_clips = gr.Slider(
             1, i2vcfg.MAX_N_CLIPS, value=1, step=1, label="🔗 Clips a encadenar",
             info="1 = un solo clip. >1 encadena clips (último frame → arranque del "
-                 "siguiente) para vídeos largos SIN petar el VAE. Ej.: 3 clips de 3 s ≈ 9 s.",
+                 "siguiente) para vídeos largos SIN petar el VAE. Ej.: 3 clips de 3 s ≈ 9 s. "
+                 "Podés dar un prompt por clip separando con ||.",
         )
 
     comfy_cmd_md = gr.Markdown(_on_offload_change(i2vcfg.OFFLOAD_BALANCED))
@@ -245,11 +257,13 @@ def build_i2v_tab() -> None:
 
     with gr.Accordion("🎛️ Calidad y muestreo", open=False):
         with gr.Row():
-            steps = gr.Slider(8, 40, value=16, step=1, label="Pasos",
-                              info="5B: 16 va bien. Menos = más rápido, más artefactos.")
-            cfg = gr.Slider(1.0, 8.0, value=3.5, step=0.5, label="CFG (guidance)",
-                            info="Bajo (3.5) = respeta más TU imagen; alto = sigue más el prompt "
-                                 "(y puede inventar otra escena). El 14B-Lightning usa cfg 1.")
+            steps = gr.Slider(8, 40, value=20, step=1, label="Pasos",
+                              info="20 = plantilla oficial del 5B (mejor adherencia al prompt). "
+                                   "16 = más rápido con poca pérdida.")
+            cfg = gr.Slider(1.0, 8.0, value=4.5, step=0.5, label="CFG (guidance)",
+                            info="4.5 recomendado (oficial 5B = 5.0). La identidad ya la ancla el "
+                                 "latente: si IGNORA el prompt subí a 5; si se ve 'quemado'/"
+                                 "sobresaturado bajá a 3.5.")
             shift = gr.Slider(1.0, 12.0, value=8.0, step=0.5, label="Shift (ModelSamplingSD3)",
                               info="8.0 va bien. Afecta al ritmo del movimiento.")
         with gr.Row():
@@ -298,7 +312,7 @@ def build_i2v_tab() -> None:
     controls = [
         comfy_url, offload_preset, resolution, duration, n_clips, steps, cfg, shift, seed,
         sampler, scheduler, high_model, low_model, text_encoder, vae,
-        audio_enabled, audio_prompt, audio_steps, audio_cfg,
+        audio_enabled, audio_prompt, audio_steps, audio_cfg, prompt_boost,
     ]
     # Falla RUIDOSAMENTE al construir la UI si controls y _build_settings se
     # desalinean (evita mapear en silencio steps->cfg, etc. al reordenar uno solo).

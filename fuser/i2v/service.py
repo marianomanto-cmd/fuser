@@ -29,7 +29,10 @@ from .config import (
     I2V_OUTPUT_DIR,
     TEMP_DIR,
     WF_STABLE_AUDIO,
+    WF_WAN22_I2V_DISTORCH,
+    WF_WAN22_I2V_GGUF,
     I2VSettings,
+    boost_prompt,
     ensure_i2v_dirs,
 )
 
@@ -166,6 +169,7 @@ class I2VService:
                 progress(max(0.0, min(1.0, frac)), msg)
 
         self.ensure_available()
+        wf_note = self._ensure_workflow_supported()
         n = self._n_clips()
         ts = time.strftime("%Y%m%d_%H%M%S")
         tmps: List[Path] = []
@@ -174,7 +178,7 @@ class I2VService:
                                        phase=(0.02, 0.72), progress=p, tmps=tmps)
             video_tmp = self._join_clips(clips, ts, progress=p, tmps=tmps)
             return self._finalize(video_tmp, prompt, ts, progress=p, tmps=tmps,
-                                  resolution=f"{s.width}x{s.height}")
+                                  resolution=f"{s.width}x{s.height}", extra_note=wf_note)
         finally:
             self._cleanup(tmps)
 
@@ -198,6 +202,7 @@ class I2VService:
                 progress(max(0.0, min(1.0, frac)), msg)
 
         self.ensure_available()
+        wf_note = self._ensure_workflow_supported()
         n = self._n_clips()
         ts = time.strftime("%Y%m%d_%H%M%S")
         tmps: List[Path] = []
@@ -211,7 +216,7 @@ class I2VService:
             video_tmp = self._join_clips([base_video, *clips], ts, progress=p,
                                          tmps=tmps, force=True)
             return self._finalize(video_tmp, prompt, ts, progress=p, tmps=tmps,
-                                  resolution=f"{info.width}x{info.height}")
+                                  resolution=f"{info.width}x{info.height}", extra_note=wf_note)
         finally:
             self._cleanup(tmps)
 
@@ -220,11 +225,42 @@ class I2VService:
         from .config import MAX_N_CLIPS
         return max(1, min(MAX_N_CLIPS, int(getattr(self.settings, "n_clips", 1) or 1)))
 
+    def _ensure_workflow_supported(self) -> str:
+        """Degrada con elegancia si el workflow pide un custom node ausente.
+
+        El preset "Offload máximo" usa DisTorch2 (ComfyUI-MultiGPU). Si el nodo no
+        está (o ComfyUI no se reinició tras instalarlo), caemos al 14B GGUF estándar
+        en vez de dejar que ComfyUI rechace el grafo con un 400.
+        """
+        s = self.settings
+        if s.workflow == WF_WAN22_I2V_DISTORCH and \
+                not self.client.has_node("UnetLoaderGGUFDisTorch2MultiGPU"):
+            log.warning("DisTorch2 no disponible en ComfyUI; caigo al workflow GGUF estándar.")
+            s.workflow = WF_WAN22_I2V_GGUF
+            s.virtual_vram_gb = 0.0
+            return ("Offload DisTorch2 no disponible (falta ComfyUI-MultiGPU o ComfyUI no se "
+                    "reinició tras instalarlo); usé el 14B GGUF estándar.")
+        return ""
+
+    def _clip_prompts(self, prompt: str, n: int) -> List[str]:
+        """Prompts por clip: se separan con ``||`` (el último se repite si faltan).
+
+        Con boost activado, añade a CADA clip los descriptores de calidad/movimiento
+        (estilo *prompt extension* de Wan) sin tocar lo que escribió el usuario.
+        """
+        parts = [t.strip() for t in (prompt or "").split("||")]
+        parts = [t for t in parts if t] or [(prompt or "").strip()]
+        out = [parts[min(i, len(parts) - 1)] for i in range(n)]
+        if getattr(self.settings, "prompt_boost", False):
+            out = [boost_prompt(t) for t in out]
+        return out
+
     def _render_chain(self, start_image: str, prompt: str, negative: str, *,
                       n: int, ts: str, phase: tuple, progress: ProgressCb,
                       tmps: List[Path]) -> List[Path]:
         """Renderiza ``n`` clips encadenados: último frame -> arranque del siguiente."""
         lo, hi = phase
+        prompts = self._clip_prompts(prompt, n)
         clips: List[Path] = []
         cur = start_image
         for i in range(n):
@@ -232,7 +268,7 @@ class I2VService:
             b = lo + (hi - lo) * ((i + 1) / n)
             msg = (f"Generando clip {i+1}/{n}…" if n > 1
                    else "Generando vídeo (varios minutos en 8 GB)…")
-            clip = self._render_clip(cur, prompt, negative, tag=f"{ts}_{i}",
+            clip = self._render_clip(cur, prompts[i], negative, tag=f"{ts}_{i}",
                                      phase=(a, b), phase_msg=msg, progress=progress)
             clips.append(clip); tmps.append(clip)
             if i < n - 1:
@@ -282,20 +318,24 @@ class I2VService:
         return joined
 
     def _finalize(self, video_tmp: Path, prompt: str, ts: str, *,
-                  progress: ProgressCb, tmps: List[Path], resolution: str) -> Dict:
+                  progress: ProgressCb, tmps: List[Path], resolution: str,
+                  extra_note: str = "") -> Dict:
         """Audio (opcional, para la duración REAL del vídeo) + copia a outputs/."""
         info = videoutil.probe(str(video_tmp))
         audio_tmp: Optional[Path] = None
-        note = ""
+        note = extra_note
         if self.settings.audio_enabled:
             try:
-                audio_tmp = self._generate_audio(prompt, ts, seconds=info.duration + 0.2,
+                # El prompt de audio no entiende el separador de clips "||".
+                audio_tmp = self._generate_audio(prompt.replace("||", ", "), ts,
+                                                 seconds=info.duration + 0.2,
                                                  progress=progress)
                 if audio_tmp:
                     tmps.append(audio_tmp)
             except Exception as exc:  # el audio no debe tumbar el resultado
                 log.warning("Fallo al generar audio: %s", exc)
-                note = "Audio no disponible (falló su generación); vídeo sin sonido."
+                note = (note + "  " if note else "") + \
+                    "Audio no disponible (falló su generación); vídeo sin sonido."
                 progress(0.90, "Audio no disponible; entrego el vídeo sin sonido.")
 
         progress(0.92, "Finalizando…")
@@ -306,7 +346,8 @@ class I2VService:
             if not muxed:
                 log.warning("El audio se generó pero el mux con ffmpeg falló; vídeo sin "
                             "sonido. ¿ffmpeg instalado y en PATH?")
-                note = "Audio generado pero no se pudo mezclar (¿ffmpeg en PATH?)."
+                note = (note + "  " if note else "") + \
+                    "Audio generado pero no se pudo mezclar (¿ffmpeg en PATH?)."
         if not muxed:
             shutil.copyfile(str(video_tmp), str(final))
         progress(1.0, "¡Listo!")

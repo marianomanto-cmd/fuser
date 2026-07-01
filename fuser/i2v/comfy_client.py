@@ -160,6 +160,20 @@ class ComfyUIClient:
         info = self.get_object_info()
         return {c: (c in info) for c in class_types}
 
+    def has_node(self, class_type: str) -> bool:
+        """Comprueba UN nodo vía ``/object_info/<clase>`` (ligero, sin bajar todo).
+
+        ComfyUI devuelve ``{}`` si la clase no existe. Usado para degradar con
+        elegancia workflows que dependen de custom nodes (p.ej. DisTorch2).
+        """
+        try:
+            d = self._get_json(f"/object_info/{class_type}")
+            return isinstance(d, dict) and class_type in d
+        except ComfyUIError:
+            return False
+        except Exception:  # pragma: no cover - respuesta rara
+            return False
+
     # ---- Subida de imagen --------------------------------------------------
     def upload_image(self, image_path: str, subfolder: str = "fuser_i2v",
                      overwrite: bool = True) -> str:
