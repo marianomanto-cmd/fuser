@@ -185,6 +185,31 @@ class FFmpegVideoWriter:
         self.proc.wait()
 
 
+def mux_external_audio(video: str, audio: str, output: str) -> bool:
+    """Mezcla una pista de audio EXTERNA (wav/flac/mp3) sobre un vídeo.
+
+    Usado por la función *Imagen → Vídeo*: Wan genera el vídeo sin sonido y el
+    audio se genera por separado. ``-shortest`` recorta al más corto de los dos
+    (normalmente ya vienen igualados en duración). Devuelve True si tuvo éxito.
+    """
+    ff = ffmpeg_path()
+    if not ff:
+        return False
+    cmd = [
+        ff, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video), "-i", str(audio),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-shortest", str(output),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return True
+    except Exception as exc:  # pragma: no cover
+        log.warning("No se pudo mezclar el audio externo: %s", exc)
+        return False
+
+
 def mux_audio(video_no_audio: str, original: str, output: str) -> bool:
     """Copia la pista de audio de ``original`` al vídeo procesado.
 

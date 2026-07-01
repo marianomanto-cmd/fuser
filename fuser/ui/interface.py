@@ -28,6 +28,13 @@ from ..utils import video as videoutil
 from ..utils.logging import get_logger
 from ..utils.system import format_system_summary
 
+try:
+    # Pestaña Imagen → Vídeo (Wan 2.2 vía ComfyUI). Opcional: si algo falla en su
+    # import, la app sigue funcionando sin esa pestaña.
+    from .i2v_interface import build_i2v_tab
+except Exception:  # pragma: no cover
+    build_i2v_tab = None
+
 log = get_logger(__name__)
 
 _PIPELINE_CACHE: dict = {"pipeline": None, "signature": None}
@@ -175,11 +182,12 @@ def _recommendation(mode: str, engine: str) -> str:
     """Recomendación automática según el modo y el motor elegidos (para la UI)."""
     tips = {
         config.EXPR_MUSIC_VIDEO: (
-            "🎤 **Videos musicales** — ✅ **FaceFusion** con el modelo **ghost_3 256** (mejor "
-            "identidad y detalle que el inswapper 128 clásico) + **post-procesado agresivo de "
-            "boca/dientes** + **2 pasadas** + **RAM al máximo** + **6 referencias**. "
-            "Sube **4–6 fotos** (frontal, 3/4 y perfil; con boca abierta y cerrada) y previsualiza un "
-            "frame con la boca abierta y uno de perfil. ¿Identidad rara? Probá **🔬 Comparar modelos**."
+            "🎤 **Videos musicales** — ✅ **FaceFusion** con **inswapper_128** (el más **estable** "
+            "en mucho movimiento: no se 'mueve'/desencaja) + **CodeFormer 512** para la nitidez + "
+            "**post-procesado agresivo de boca/dientes** + **2 pasadas** + **RAM al máximo** + "
+            "**6 referencias**. Sube **4–6 fotos** (frontal, 3/4 y perfil; boca abierta y cerrada). "
+            "¿Querés más identidad/detalle? Probá los modelos de 256 px con **🔬 Comparar modelos** "
+            "(transfieren la forma de cara: más parecido, pero pueden moverse más en perfiles)."
         ),
         config.EXPR_HIGH_EXPRESSION: (
             "😮 **Alta expresión** — FaceFusion + realce fuerte de **boca y ojos**. Ideal para "
@@ -654,7 +662,7 @@ def build_interface() -> gr.Blocks:
                             info="Solo CodeFormer: 0 = más detalle/nítido, 1 = más fiel al original.",
                         )
 
-                with gr.Accordion("👁️ Details (ojos / boca / máscara)", open=True):
+                with gr.Accordion("👁️ Ajuste fino: ojos / boca / máscara (opcional)", open=False):
                     with gr.Row():
                         eye_preservation = gr.Slider(
                             0.0, 1.0, value=0.4, step=0.05, label="👁️ Preservación de ojos",
@@ -703,10 +711,11 @@ def build_interface() -> gr.Blocks:
                     gr.Markdown(config.ENGINE_INFO_MD)
                     with gr.Row():
                         ff_swapper_model = gr.Dropdown(
-                            choices=config.FF_SWAPPER_CHOICES, value="ghost_3_256",
+                            choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
                             label="Modelo de swap de FaceFusion",
-                            info="El swapper es la mayor palanca de calidad. ghost_3/hififace/simswap "
-                                 "= 256 px (mejor identidad y detalle); inswapper = 128 px (rápido).",
+                            info="inswapper_128 = el más ESTABLE (preserva la forma de cara, no se "
+                                 "'mueve'). Los de 256 px (ghost/hififace/simswap) dan más identidad/"
+                                 "detalle pero transfieren la forma → pueden moverse más en perfiles.",
                         )
                         ff_pixel_boost = gr.Dropdown(
                             choices=config.FF_PIXEL_BOOST_CHOICES, value="256x256",
@@ -812,8 +821,12 @@ def build_interface() -> gr.Blocks:
                     gr.Markdown("#### 🚀 Process")
                     process_btn = gr.Button("🚀 Procesar vídeo completo", variant="primary")
 
-        # ===== Pestañas secundarias: comparar modelos · herramientas =====
+        # ===== Más modos: Imagen→Vídeo · comparar modelos · herramientas =====
+        gr.Markdown("### 🧭 Más modos y herramientas")
         with gr.Tabs():
+            if build_i2v_tab is not None:
+                with gr.Tab("🎞️ Imagen → Vídeo (Wan 2.2)"):
+                    build_i2v_tab()
             with gr.Tab("🔬 Comparar modelos"):
                 gr.Markdown(
                     "Probá varios modelos de swap sobre **tu** cara y **tu** video, en los mismos "
