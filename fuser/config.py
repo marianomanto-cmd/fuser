@@ -298,7 +298,7 @@ EXPR_HIGH_EXPRESSION = "high_expression"
 EXPR_MAX = "max"
 
 EXPRESSION_MODE_LABELS: Dict[str, str] = {
-    "🔥 MÁXIMO (hififace + pixel boost 512 + todo al máximo)": EXPR_MAX,
+    "🔥 MÁXIMO (hyperswap 512 + máscaras finas + todo al máximo)": EXPR_MAX,
     "🎤 Videos musicales (caras cantando)": EXPR_MUSIC_VIDEO,
     "😮 Alta expresión (boca/ojos extremos)": EXPR_HIGH_EXPRESSION,
     "Estándar (rápido)": EXPR_STANDARD,
@@ -317,17 +317,26 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
     # máximo. Es el más LENTO; para el render final de máxima fidelidad.
     EXPR_MAX: dict(
         engine="facefusion",
-        ff_swapper_model="hififace_unofficial_256", ff_pixel_boost="512x512",
+        # hyperswap_1c (FaceFusion Labs 3.3+, portado en runtime a la 3.1.1): el
+        # tope de identidad de 2026 en local — "rival de inswapper a 2× resolución",
+        # preserva la forma del objetivo (estable en movimiento). Alternativas en el
+        # selector: hififace (transfiere forma) / ghost_3 (video-first).
+        ff_swapper_model="hyperswap_1c_256", ff_pixel_boost="512x512",
         enhancer_model="codeformer", enhancer_blend=1.0, codeformer_fidelity=0.5,
         ff_enhancer_weight=0.2,       # CodeFormer restaura MÁS detalle (dientes/ojos nítidos)
         ff_detector_angles=(0, 90, 180, 270),  # recupera perfiles/cabeza atrás en todas direcciones
         ff_detector_score=0.3, ff_landmarker_score=0.2, ff_temporal_fallback=True,
+        ff_occluder_model="xseg_2",   # oclusor más fino: pelo suelto/manos/micro sobre la cara
+        color_harmonize=True,         # armonización LAB post-swap (anti "cara pegada")
+        color_harmonize_strength=0.8,
         reference_distance=0.9,       # no pierde el swap en perfiles/movimiento
         mask_mode=MASK_PARSING,       # segmentación bisenet (contorno fino)
         eye_preservation=0.9, mouth_detail=1.0,
+        skin_detail=0.5,              # reinyección de textura/poros del original (anti-cera)
         color_match=True,
         temporal_smoothing=True, temporal_alpha=0.4,
         motion_adaptive=True, two_pass_temporal=True,
+        qc_second_pass=True,          # 2ª pasada de control: detecta y corrige frames defectuosos
         reference_count=0,            # 0 = usa TODAS las fotos subidas (multi-ref = +identidad)
         ram_mode=RAM_MAX,             # exprime los 40 GB de RAM
         memory_mode=MODE_MAX_QUALITY, # exprime la VRAM (arena grande, enhancer en GPU)
@@ -435,6 +444,7 @@ ENGINE_INFO_MD = (
 #   nítidos usá ghost_3 o inswapper. Etiquetas honestas (antes decían "+detalle"/
 #   "máx. resolución", que era al revés).
 FF_SWAPPER_CHOICES = [
+    ("hyperswap_1c_256 (FF Labs 3.3+: identidad a 2× resolución — MÁXIMO)", "hyperswap_1c_256"),
     ("inswapper_128 (estable, recomendado)", "inswapper_128"),
     ("inswapper_128_fp16 (estable, menos VRAM)", "inswapper_128_fp16"),
     ("ghost_3_256 (+identidad, ojos más NÍTIDOS*)", "ghost_3_256"),
@@ -517,6 +527,11 @@ class Settings:
     # FaceFusion: nitidez del enhancer nativo (CodeFormer). 0 = detalle/nítido, 1 = fiel a la entrada (borrosa).
     ff_enhancer_weight: float = 0.8
     ff_temporal_fallback: bool = True        # rellena huecos de detección reusando los últimos kps (anti-salto)
+    ff_occluder_model: str = "xseg_1"        # oclusor (pelo/manos/micro): xseg_2 = más fino (modo MÁXIMO)
+    # Armonización fotométrica post-swap (LAB, ver core/postfx.py): iguala el
+    # tono/iluminación de la cara pegada al frame original. Anti "cara pegada".
+    color_harmonize: bool = False
+    color_harmonize_strength: float = 0.8
 
     # --- Modelos ---
     swapper_model: str = "inswapper_128"

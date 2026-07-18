@@ -106,7 +106,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
     # ----- post-procesado por regiones (calidad de boca/dientes/ojos) ---------
     def _mouth_open_boost(self) -> float:
         m = self.settings.expression_mode
-        if m == config.EXPR_HIGH_EXPRESSION:
+        if m in (config.EXPR_HIGH_EXPRESSION, config.EXPR_MAX):
             return 2.0
         if m == config.EXPR_MUSIC_VIDEO:
             return 1.5
@@ -205,7 +205,8 @@ class FaceFusionSwapper(BaseFaceSwapper):
         from ..utils import image as imageutil
 
         s = self.settings
-        music = s.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        music = s.expression_mode in (
+            config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION, config.EXPR_MAX)
         if not faces:
             return frame
 
@@ -275,6 +276,96 @@ class FaceFusionSwapper(BaseFaceSwapper):
             raise FaceFusionNotAvailable(str(exc))
         return self._modules
 
+    # ------------------------------------------------------------------
+    # hyperswap (FaceFusion Labs 3.3+) portado en runtime a la 3.1.1 vendorizada
+    # ------------------------------------------------------------------
+    # Port mínimo verificado contra el código oficial 3.3.0 (3 piezas):
+    #   1. Entradas del model_set — con el template renombrado a 'arcface_128_v2'
+    #      (en 3.3.0 se llama 'arcface_128'; la 3.1.1 solo tiene la variante _v2,
+    #      coordenadas idénticas — puro rename; usar el nombre 3.3.0 crashea el warp).
+    #   2. prepare_source_embedding: hyperswap usa el embedding ArcFace w600k_r50
+    #      normalizado TAL CUAL (source_face.normed_embedding), sin converter.
+    #   3. normalize_crop_frame: hyperswap des-normaliza como ghost/hififace/uniface.
+    # Se hace por MONKEYPATCH (no se toca vendor/: está gitignoreado y una
+    # reinstalación lo pisaría). Idempotente vía el flag _fuser_hyperswap.
+    _HYPERSWAP_NAMES = ("hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256")
+
+    def _register_hyperswap(self) -> None:
+        fs = self._modules.get("swapper")
+        if fs is None or getattr(fs, "_fuser_hyperswap", False):
+            return
+        try:
+            def _entry(name: str) -> dict:
+                return {
+                    "hashes": {"face_swapper": {
+                        "url": fs.resolve_download_url("models-3.3.0", f"{name}.hash"),
+                        "path": fs.resolve_relative_path(f"../.assets/models/{name}.hash"),
+                    }},
+                    "sources": {"face_swapper": {
+                        "url": fs.resolve_download_url("models-3.3.0", f"{name}.onnx"),
+                        "path": fs.resolve_relative_path(f"../.assets/models/{name}.onnx"),
+                    }},
+                    "type": "hyperswap",
+                    "template": "arcface_128_v2",   # rename 3.1.1 (¡no 'arcface_128'!)
+                    "size": (256, 256),
+                    "mean": [0.5, 0.5, 0.5],
+                    "standard_deviation": [0.5, 0.5, 0.5],
+                }
+
+            # 1) model_set: envolvemos la factory (lru_cache) para inyectar las entradas.
+            orig_set = fs.create_static_model_set
+
+            def create_with_hyperswap(scope):
+                model_set = orig_set(scope)
+                for name in self._HYPERSWAP_NAMES:
+                    if name not in model_set:
+                        model_set[name] = _entry(name)
+                return model_set
+
+            fs.create_static_model_set = create_with_hyperswap
+
+            # 2) embedding: rama hyperswap; el resto delega en el original.
+            orig_embed = fs.prepare_source_embedding
+
+            def prepare_with_hyperswap(source_face):
+                if fs.get_model_options().get("type") == "hyperswap":
+                    return source_face.normed_embedding.reshape((1, -1))
+                return orig_embed(source_face)
+
+            fs.prepare_source_embedding = prepare_with_hyperswap
+
+            # 3) des-normalización de la salida (réplica exacta de la rama 3.3.0).
+            orig_norm = fs.normalize_crop_frame
+
+            def normalize_with_hyperswap(crop_vision_frame):
+                opts = fs.get_model_options()
+                if opts.get("type") == "hyperswap":
+                    crop_vision_frame = crop_vision_frame.transpose(1, 2, 0)
+                    crop_vision_frame = (crop_vision_frame * opts.get("standard_deviation")
+                                         + opts.get("mean"))
+                    crop_vision_frame = crop_vision_frame.clip(0, 1)
+                    crop_vision_frame = crop_vision_frame[:, :, ::-1] * 255
+                    return crop_vision_frame
+                return orig_norm(crop_vision_frame)
+
+            fs.normalize_crop_frame = normalize_with_hyperswap
+
+            # 4) choices: pixel boost por interleave (mismas opciones que en 3.3.0).
+            try:
+                p_choices = importlib.import_module("facefusion.processors.choices")
+                for name in self._HYPERSWAP_NAMES:
+                    p_choices.face_swapper_set.setdefault(
+                        name, ["256x256", "512x512", "768x768", "1024x1024"])
+                    if name not in p_choices.face_swapper_models:
+                        p_choices.face_swapper_models.append(name)
+            except Exception as exc:  # pragma: no cover
+                log.warning("hyperswap: no pude registrar choices (%s)", exc)
+
+            fs._fuser_hyperswap = True
+            log.info("hyperswap 1a/1b/1c registrados en FaceFusion 3.1.1 (port runtime).")
+        except Exception as exc:  # pragma: no cover - degradación: sin hyperswap
+            log.warning("No se pudo registrar hyperswap (%s); sigue disponible el resto.", exc)
+
     def _set(self, key: str, value) -> None:
         """Fija un item del state_manager de FaceFusion de forma tolerante."""
         state = self._modules["state"]
@@ -326,7 +417,8 @@ class FaceFusionSwapper(BaseFaceSwapper):
     # ----- configuración (integra con memory_manager + modo musical) ----------
     def _configure(self) -> None:
         s = self.settings
-        music = s.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        music = s.expression_mode in (
+            config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION, config.EXPR_MAX)
 
         # En DirectML añadimos "cpu" como fallback por-operación: CodeFormer tiene un
         # input float64 que DirectML no soporta; onnxruntime coloca ESA op en CPU (en
@@ -427,9 +519,15 @@ class FaceFusionSwapper(BaseFaceSwapper):
         # como las máscaras se intersectan, la caja retraída recorta el sobrante del
         # parser. (Quitar la caja NO sirve: el padding deja de aplicarse. Investigado:
         # r/FF + lectura de facefusion/face_masker.py — ver research_cheatsheet.json.)
-        shape_transfer = s.ff_swapper_model not in ("inswapper_128", "inswapper_128_fp16")
+        # hyperswap (FF Labs 3.3+) preserva la forma del objetivo (sucesor de
+        # inswapper): sin retracción de máscara; el parser fino entra por parsing.
+        shape_transfer = s.ff_swapper_model not in (
+            "inswapper_128", "inswapper_128_fp16",
+            "hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256",
+        )
         # Modelos de máscara de máxima calidad (se descargan solos la 1ª vez).
-        self._set("face_occluder_model", "xseg_1")            # oclusión pelo/manos/micro
+        occluder = s.ff_occluder_model if s.ff_occluder_model in ("xseg_1", "xseg_2") else "xseg_1"
+        self._set("face_occluder_model", occluder)            # oclusión pelo/manos/micro (xseg_2 = más fino)
         self._set("face_parser_model", "bisenet_resnet_34")   # parser de cara más fino
         if shape_transfer:
             self._set("face_mask_types", ["box", "occlusion", "region"])  # box + padding
@@ -462,6 +560,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         if progress:
             progress(0.2, "Importando FaceFusion…")
         self._import()
+        self._register_hyperswap()
         self._init_ff_defaults()
         self._configure()
         if progress:

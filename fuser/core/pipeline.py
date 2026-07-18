@@ -27,6 +27,7 @@ from ..utils import video as videoutil
 from ..utils.logging import get_logger
 from .memory_manager import MemoryManager
 from .temporal import apply_two_pass_smoothing
+from . import postfx
 
 log = get_logger(__name__)
 
@@ -52,6 +53,30 @@ class SwapPipeline:
         self.mm = MemoryManager(self.settings)
         self.engine = None
         self._loaded = False
+        self._postfx_warned = False
+
+    # ----- swap de un frame (motor + post-fx fotométrico) ----------------------
+    def _swap_frame(self, frame: np.ndarray, use_smoothing: bool) -> np.ndarray:
+        """Único punto de swap: motor + armonización LAB opcional (modo MÁXIMO).
+
+        La armonización compara el frame ANTES/DESPUÉS para localizar la huella
+        del pegado e igualar tono/iluminación al original (ver core/postfx.py).
+        Corre en CPU (~ms/frame) y degrada con gracia: si falla, devuelve el
+        swap sin corregir y avisa UNA vez (sin spamear el log por frame).
+        """
+        out = self.engine.process_frame(frame, use_smoothing=use_smoothing)
+        s = self.settings
+        if getattr(s, "color_harmonize", False) and out is not None:
+            try:
+                out = postfx.harmonize_swap(
+                    frame, out,
+                    strength=float(getattr(s, "color_harmonize_strength", 0.8)),
+                )
+            except Exception as exc:  # pragma: no cover
+                if not self._postfx_warned:
+                    self._postfx_warned = True
+                    log.warning("Armonización de color desactivada (falló: %s)", exc)
+        return out
 
     # ----- carga de modelos ----------------------------------------------------
     def load_models(self, progress: ProgressCb = None) -> None:
@@ -113,7 +138,8 @@ class SwapPipeline:
             return False
         if self.settings.two_pass_temporal:
             return True
-        music = self.settings.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        music = self.settings.expression_mode in (
+            config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION, config.EXPR_MAX)
         if music and self.engine.prefers_two_pass():
             return bool(self.mm.get_recommended_mode()["two_pass"])
         return False
@@ -136,7 +162,7 @@ class SwapPipeline:
             if progress:
                 progress((i + 1) / max(1, len(frames)), f"Previsualizando frame {idx}…")
             work, _ = imageutil.limit_resolution(frame, self.settings.processing_resolution)
-            out = self.engine.process_frame(work, use_smoothing=False)
+            out = self._swap_frame(work, use_smoothing=False)
             results.append((imageutil.to_rgb(out), f"Frame {idx}"))
         return results
 
@@ -155,7 +181,8 @@ class SwapPipeline:
 
         # El pipeline decide el flujo consultando las capacidades del motor.
         caps = self.engine.get_capabilities()
-        music = self.settings.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        music = self.settings.expression_mode in (
+            config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION, config.EXPR_MAX)
         region_enh = bool(caps.get("region_enhancement") and music and self.settings.mouth_enhancer)
         log.info(
             "Flujo: motor=%s · 2 pasadas=%s · realce localizado de boca=%s",
@@ -303,7 +330,7 @@ class SwapPipeline:
             return None
 
         def _fn(frame):
-            return self.engine.process_frame(frame, use_smoothing=False)
+            return self._swap_frame(frame, use_smoothing=False)
 
         return _fn
 
@@ -369,7 +396,7 @@ class SwapPipeline:
                     break
                 if "decode" in errors:
                     raise errors["decode"]
-                out_q.put(self.engine.process_frame(frame, use_smoothing=True))
+                out_q.put(self._swap_frame(frame, use_smoothing=True))
                 processed += 1
                 self._emit_progress(progress, processed, total, start)
         finally:
@@ -389,7 +416,8 @@ class SwapPipeline:
         total = max(1, info.frame_count)
         # Modo musical/alta expresión: ventana de estabilización más amplia
         # (el suavizado adaptativo mantiene la boca rápida sin "lag").
-        music = self.settings.expression_mode in (config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION)
+        music = self.settings.expression_mode in (
+            config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION, config.EXPR_MAX)
         time_sigma = 3.0 if music else 2.0
         if self.mm.is_facefusion:
             time_sigma += 0.5  # mejor calidad base -> tolera suavizado más fuerte

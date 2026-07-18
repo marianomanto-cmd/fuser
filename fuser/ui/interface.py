@@ -14,7 +14,10 @@ Gradio + CSS custom (ver ``CUSTOM_CSS``), sin tocar la lógica ni el wiring.
 """
 from __future__ import annotations
 
+import json
+import time
 from collections import deque
+from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
 
@@ -129,7 +132,8 @@ def _build_settings(
     # control propio, así no pisa elecciones manuales del usuario.
     preset = config.EXPRESSION_PRESETS.get(expression_mode, {})
     for k in ("ff_detector_angles", "ff_detector_score", "ff_landmarker_score",
-              "ff_temporal_fallback", "ff_enhancer_weight"):
+              "ff_temporal_fallback", "ff_enhancer_weight",
+              "ff_occluder_model", "color_harmonize", "color_harmonize_strength"):
         if k in preset:
             setattr(s, k, preset[k])
     return s
@@ -214,6 +218,15 @@ def _apply_expression_mode(mode: str):
 def _recommendation(mode: str, engine: str) -> str:
     """Recomendación automática según el modo y el motor elegidos (para la UI)."""
     tips = {
+        config.EXPR_MAX: (
+            "🔥 **MÁXIMO** — el pipeline completo de máxima fidelidad: **hyperswap_1c a "
+            "pixel boost 512** (multi-referencia con TODAS tus fotos), máscaras **xseg_2 + "
+            "bisenet**, CodeFormer restaurando detalle + realce de boca/ojos + textura de "
+            "piel, **armonización de color/iluminación**, 2 pasadas y **QC** anti-defectos. "
+            "Es el más lento. Consejo: subí **4–8 fotos nítidas** (frontal, 3/4, perfil; "
+            "boca abierta y cerrada) — sigue siendo el factor nº1 de parecido. "
+            "El botón **🚀 MAXIMUM SWAP** corre esto mismo de un clic, ignorando los controles."
+        ),
         config.EXPR_MUSIC_VIDEO: (
             "🎤 **Videos musicales** — ✅ **FaceFusion** con **inswapper_128** (el más **estable** "
             "en mucho movimiento: no se 'mueve'/desencaja) + **CodeFormer 512** para la nitidez + "
@@ -325,6 +338,85 @@ def _on_process(source_files, video_path, *control_values, progress=gr.Progress(
     except Exception as exc:  # pragma: no cover
         log.exception("Error al procesar el vídeo")
         raise gr.Error(f"Error al procesar: {exc}")
+
+
+def _max_settings() -> config.Settings:
+    """Settings del 🚀 MAXIMUM SWAP: la opción nuclear, IGNORA los controles.
+
+    Parte de los defaults, aplica el preset EXPR_MAX completo (todas sus claves
+    mapean 1:1 a ``Settings``) y remata con resolución/calidad de salida al tope
+    y la arena de VRAM del modo de máxima calidad. Reproducible: el handler
+    guarda el dict exacto usado en ``tmp/maximum_swap_*.json``.
+    """
+    s = config.Settings()
+    s.expression_mode = config.EXPR_MAX
+    for key, value in config.EXPRESSION_PRESETS[config.EXPR_MAX].items():
+        setattr(s, key, value)
+    s.processing_resolution = 1080     # máxima resolución práctica de trabajo
+    s.output_quality = 98              # encode casi sin pérdida
+    s.gpu_mem_limit_gb = config.MEMORY_PRESETS[config.MODE_MAX_QUALITY]["gpu_mem_limit_gb"]
+    return s
+
+
+def _on_maximum_swap(source_files, video_path, progress=gr.Progress()):
+    """🚀 MAXIMUM SWAP: pipeline completo de máxima fidelidad, de un clic.
+
+    Etapas: (1) carga de modelos → (2) swap multi-referencia con pixel boost 512
+    + máscaras xseg_2/bisenet → (3) restauración CodeFormer + realce localizado
+    de boca/ojos + textura de piel → (4) armonización fotométrica LAB → (5) 2ª
+    pasada temporal + QC de defectos. Devuelve además un ANTES/DESPUÉS del frame
+    central y registra los ajustes exactos (reproducibilidad).
+    """
+    settings = _max_settings()
+    try:
+        progress(0.0, desc="🚀 Etapa 1/5 · Cargando modelos (swap + xseg_2 + bisenet + CodeFormer)…")
+        pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.12, desc=f"🚀 Etapa 1/5 · {m}"))
+        src = _prepare(pipeline, source_files, video_path)
+
+        def cb(frac, msg=""):
+            progress(0.12 + frac * 0.88, desc=f"🚀 {msg}")
+
+        out_path = pipeline.process_video(video_path, progress=cb)
+
+        # Antes/Después del frame central para el slider comparador.
+        before_after = None
+        try:
+            info = videoutil.probe(video_path)
+            mid = max(0, info.frame_count // 2)
+            b = videoutil.get_frames_at(video_path, [mid])
+            a = videoutil.get_frames_at(out_path, [mid])
+            if b and a:
+                h = min(b[0].shape[0], a[0].shape[0])
+                bb = cv2.resize(b[0], (max(2, int(b[0].shape[1] * h / b[0].shape[0])), h))
+                aa = cv2.resize(a[0], (bb.shape[1], h))
+                before_after = (cv2.cvtColor(bb, cv2.COLOR_BGR2RGB),
+                                cv2.cvtColor(aa, cv2.COLOR_BGR2RGB))
+        except Exception as exc:  # pragma: no cover - solo cosmético
+            log.warning("No pude armar el antes/después: %s", exc)
+
+        # Reproducibilidad: settings EXACTOS de esta pasada.
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        log_name = f"maximum_swap_{stamp}.json"
+        try:
+            config.ensure_dirs()
+            (config.TEMP_DIR / log_name).write_text(
+                json.dumps(asdict(settings), indent=2, default=str), encoding="utf-8")
+        except Exception:  # pragma: no cover
+            log_name = "(no se pudo guardar)"
+
+        status = (
+            f"🚀 ✅ **MAXIMUM SWAP** terminado. {src}\n\n"
+            f"Pipeline: **{settings.ff_swapper_model} @ {settings.ff_pixel_boost}** · "
+            f"máscaras **xseg_2 + bisenet_34** · CodeFormer (peso {settings.ff_enhancer_weight}) "
+            f"+ realce de boca/ojos · **armonización LAB** · 2 pasadas + **QC**.  "
+            f"Ajustes exactos: `tmp/{log_name}`"
+        )
+        return out_path, out_path, status, before_after
+    except gr.Error:
+        raise
+    except Exception as exc:  # pragma: no cover
+        log.exception("Error en MAXIMUM SWAP")
+        raise gr.Error(f"Error en MAXIMUM SWAP: {exc}")
 
 
 def _queue_duration_seconds(video_path: str) -> float:
@@ -540,6 +632,21 @@ CUSTOM_CSS = """
   border: none !important;
   font-weight: 700 !important;
 }
+/* 🚀 MAXIMUM SWAP: el botón "nuclear" — inconfundible */
+#max-swap-btn {
+  background: linear-gradient(135deg, #ff7a18 0%, #ff2d55 60%, #c81d8f 100%) !important;
+  color: #ffffff !important;
+  border: none !important;
+  font-weight: 800 !important;
+  font-size: 1.06rem !important;
+  padding: 14px 18px !important;
+  letter-spacing: 0.3px;
+  box-shadow: 0 6px 22px rgba(255, 45, 85, 0.35) !important;
+}
+#max-swap-btn:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 10px 28px rgba(255, 45, 85, 0.5) !important;
+}
 .gradio-container button.primary:hover {
   box-shadow: 0 8px 16px rgba(0, 212, 255, 0.25) !important;
 }
@@ -658,6 +765,10 @@ def build_interface() -> gr.Blocks:
                     gr.Markdown("#### 🎉 Resultado")
                     output_video = gr.Video(label="Vídeo resultado")
                     output_file = gr.File(label="⬇️ Descargar resultado")
+                    ba_slider = gr.ImageSlider(
+                        label="🆚 Antes / Después (frame central — arrastrá el divisor)",
+                        type="numpy", visible=True,
+                    )
                 gr.Markdown(
                     "🔬 *¿No sabés qué modelo usa mejor tu cara? Probá la pestaña "
                     "**Comparar modelos** abajo.*  ·  ⏭️✂️ *Cola y cortar video: pestaña "
@@ -860,7 +971,19 @@ def build_interface() -> gr.Blocks:
                         0.0, 1.0, value=0.5, step=0.05, label="Sensibilidad de la 2ª pasada",
                         info="0 = solo defectos claros · 1 = agresivo (marca y corrige más frames).",
                     )
-                    process_btn = gr.Button("🚀 Procesar vídeo completo", variant="primary")
+                    process_btn = gr.Button("Procesar vídeo completo", variant="primary")
+                    max_swap_btn = gr.Button(
+                        "🚀 MAXIMUM SWAP — máxima fidelidad (lento)",
+                        variant="primary", elem_id="max-swap-btn",
+                    )
+                    gr.Markdown(
+                        "_**MAXIMUM SWAP** ignora los controles y corre el pipeline completo de "
+                        "máxima calidad: swap a **pixel boost 512** multi-referencia, máscaras "
+                        "**xseg_2 + bisenet**, CodeFormer + realce de boca/ojos + textura de piel, "
+                        "**armonización de color/iluminación**, 2 pasadas temporales y **QC** "
+                        "anti-defectos. Tarda varias veces más que el modo normal._",
+                        elem_classes="fuser-soft",
+                    )
 
         # ===== Más modos: comparar modelos · herramientas =====
         gr.Markdown("### 🧭 Más modos y herramientas")
@@ -956,6 +1079,11 @@ def build_interface() -> gr.Blocks:
             _on_process,
             inputs=[source_files, target_video, *control_inputs],
             outputs=[output_video, output_file, status_md],
+        )
+        max_swap_btn.click(
+            _on_maximum_swap,
+            inputs=[source_files, target_video],   # nuclear: ignora los controles
+            outputs=[output_video, output_file, status_md, ba_slider],
         )
         queue_btn.click(
             _on_process_queue,
