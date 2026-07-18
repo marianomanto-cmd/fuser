@@ -151,6 +151,10 @@ class FFmpegVideoWriter:
         self.path = str(path)
         self.width = width
         self.height = height
+        # Guard: crf es CRF de x264 (0=sin pérdida .. 51=peor). Un valor tipo
+        # "calidad 95" pasado por error destrozaría el video con macrobloques;
+        # lo acotamos a un rango sano.
+        crf = int(np.clip(crf, 0, 28))
         ff = ffmpeg_path()
         if not ff:
             raise RuntimeError("FFmpeg no disponible para escribir el vídeo.")

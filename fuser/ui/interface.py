@@ -219,8 +219,8 @@ def _recommendation(mode: str, engine: str) -> str:
     """Recomendación automática según el modo y el motor elegidos (para la UI)."""
     tips = {
         config.EXPR_MAX: (
-            "🔥 **MÁXIMO** — el pipeline completo de máxima fidelidad: **hyperswap_1c a "
-            "pixel boost 512** (multi-referencia con TODAS tus fotos), máscaras **xseg_2 + "
+            "🔥 **MÁXIMO** — el pipeline completo de máxima fidelidad: **inswapper a "
+            "pixel boost 512** (ganador medido en esta GPU) (multi-referencia con TODAS tus fotos), máscaras **xseg_2 + "
             "bisenet**, CodeFormer restaurando detalle + realce de boca/ojos + textura de "
             "piel, **armonización de color/iluminación**, 2 pasadas y **QC** anti-defectos. "
             "Es el más lento. Consejo: subí **4–8 fotos nítidas** (frontal, 3/4, perfil; "
@@ -353,7 +353,10 @@ def _max_settings() -> config.Settings:
     for key, value in config.EXPRESSION_PRESETS[config.EXPR_MAX].items():
         setattr(s, key, value)
     s.processing_resolution = 1080     # máxima resolución práctica de trabajo
-    s.output_quality = 98              # encode casi sin pérdida
+    # ¡OJO! output_quality es el CRF de x264 (MENOR = mejor). 10 ≈ casi sin
+    # pérdida. (Poner 98 aquí fue el bug del "video deformado": x264 lo clampa
+    # a 51 = peor calidad posible y el encoder tritura TODO el frame.)
+    s.output_quality = 10
     s.gpu_mem_limit_gb = config.MEMORY_PRESETS[config.MODE_MAX_QUALITY]["gpu_mem_limit_gb"]
     return s
 

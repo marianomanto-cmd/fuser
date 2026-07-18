@@ -298,7 +298,7 @@ EXPR_HIGH_EXPRESSION = "high_expression"
 EXPR_MAX = "max"
 
 EXPRESSION_MODE_LABELS: Dict[str, str] = {
-    "🔥 MÁXIMO (hyperswap 512 + máscaras finas + todo al máximo)": EXPR_MAX,
+    "🔥 MÁXIMO (inswapper 512 + máscaras finas + todo al máximo)": EXPR_MAX,
     "🎤 Videos musicales (caras cantando)": EXPR_MUSIC_VIDEO,
     "😮 Alta expresión (boca/ojos extremos)": EXPR_HIGH_EXPRESSION,
     "Estándar (rápido)": EXPR_STANDARD,
@@ -321,9 +321,15 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         # tope de identidad de 2026 en local — "rival de inswapper a 2× resolución",
         # preserva la forma del objetivo (estable en movimiento). Alternativas en el
         # selector: hififace (transfiere forma) / ghost_3 (video-first).
-        ff_swapper_model="hyperswap_1c_256", ff_pixel_boost="512x512",
-        enhancer_model="codeformer", enhancer_blend=1.0, codeformer_fidelity=0.5,
-        ff_enhancer_weight=0.2,       # CodeFormer restaura MÁS detalle (dientes/ojos nítidos)
+        # GANADOR del benchmark en ESTA máquina (DirectML): inswapper@512 con
+        # CodeFormer recalibrado -> identidad 0.54 (vs 0.31 hififace). hyperswap
+        # queda descartado: DirectML lo miscomputa (identidad rota, verificado
+        # DML-vs-CPU); el port sigue en el engine por si algún día hay CUDA.
+        ff_swapper_model="inswapper_128", ff_pixel_boost="512x512",
+        enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.5,
+        # 0.2 borraba la IDENTIDAD (la restauración "embellece" hacia una cara
+        # genérica). 0.4 = detalle sin perder a la persona (id 0.35 -> 0.54).
+        ff_enhancer_weight=0.4,
         ff_detector_angles=(0, 90, 180, 270),  # recupera perfiles/cabeza atrás en todas direcciones
         ff_detector_score=0.3, ff_landmarker_score=0.2, ff_temporal_fallback=True,
         ff_occluder_model="xseg_2",   # oclusor más fino: pelo suelto/manos/micro sobre la cara
@@ -444,7 +450,6 @@ ENGINE_INFO_MD = (
 #   nítidos usá ghost_3 o inswapper. Etiquetas honestas (antes decían "+detalle"/
 #   "máx. resolución", que era al revés).
 FF_SWAPPER_CHOICES = [
-    ("hyperswap_1c_256 (FF Labs 3.3+: identidad a 2× resolución — MÁXIMO)", "hyperswap_1c_256"),
     ("inswapper_128 (estable, recomendado)", "inswapper_128"),
     ("inswapper_128_fp16 (estable, menos VRAM)", "inswapper_128_fp16"),
     ("ghost_3_256 (+identidad, ojos más NÍTIDOS*)", "ghost_3_256"),
