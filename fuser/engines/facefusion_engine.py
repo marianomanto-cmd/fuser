@@ -373,21 +373,31 @@ class FaceFusionSwapper(BaseFaceSwapper):
 
         # Swapper + pixel boost (clave de calidad: corre el swap a mayor resolución).
         self._set("face_swapper_model", s.ff_swapper_model)
-        # Pixel boost = resolución interna del swap. AHORA es consciente del modelo:
-        # cada swapper tiene una resolución NATIVA mínima (FaceFusion rechaza un boost
-        # por debajo de ella). inswapper admite 128; hififace/ghost/simswap_256/uniface
-        # exigen 256; simswap_512 exige 512. Nunca bajamos de la nativa.
+        # Pixel boost = resolución interna del swap. Consciente del modelo: cada
+        # swapper tiene una resolución NATIVA mínima (inswapper 128; hififace/ghost/
+        # simswap_256/uniface 256; simswap_512 512) y nunca bajamos de ella.
+        # El boost NO es un resize: FaceFusion hace INTERLEAVE de píxeles
+        # (space-to-depth): un crop de 512 se reparte en 4 sub-frames de 256, cada
+        # uno la cara COMPLETA submuestreada -> 4 pasadas del modelo y se re-teje a
+        # 512. Misma VRAM por inferencia (la entrada sigue siendo la nativa), solo
+        # más pasadas -> también SEGURO en DirectML; el coste es tiempo:
+        # (boost/nativa)² pasadas (hififace a 512 = 4×; inswapper a 512 = 16×).
         native = config.FF_SWAPPER_NATIVE_RES.get(s.ff_swapper_model, 256)
-        if self.mm.info.gpu_provider == "DmlExecutionProvider":
-            # En DirectML (8 GB) corremos a la resolución NATIVA del modelo: es toda la
-            # calidad del swap sin saturar la VRAM (CodeFormer corre a 512 aparte y pone
-            # la nitidez final). Antes forzábamos 128, lo que con un modelo de 256 es
-            # inválido (rompía el motor) y desperdiciaba su resolución nativa.
-            res = native
+        boost = str(s.ff_pixel_boost or "native").strip().lower()
+        if boost in ("native", "auto", ""):
+            want = native          # default: nativa del modelo (rápido)
         else:
-            # CUDA: deja subir por encima de la nativa (más VRAM disponible).
-            want = 512 if music else int(str(s.ff_pixel_boost).split("x")[0])
-            res = max(native, want)
+            try:
+                want = int(boost.split("x")[0])
+            except (ValueError, IndexError):
+                want = native
+        if music and self.mm.info.gpu_provider != "DmlExecutionProvider":
+            want = max(want, 512)  # CUDA en modo musical: 512 como hasta ahora
+        res = max(native, want)
+        if self.mm.info.gpu_provider == "DmlExecutionProvider":
+            # Tope 512 en DirectML: por encima el nº de pasadas se dispara
+            # (768/1024 = 9/16 pasadas por cara y frame) sin ganancia visible.
+            res = min(res, 512)
         self._set("face_swapper_pixel_boost", f"{res}x{res}")
 
         # Enhancer: en modo musical, CodeFormer fuerte (mejor dientes/textura).

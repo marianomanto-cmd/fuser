@@ -28,13 +28,6 @@ from ..utils import video as videoutil
 from ..utils.logging import get_logger
 from ..utils.system import format_system_summary
 
-try:
-    # Pestaña Imagen → Vídeo (Wan 2.2 vía ComfyUI). Opcional: si algo falla en su
-    # import, la app sigue funcionando sin esa pestaña.
-    from .i2v_interface import build_i2v_tab
-except Exception:  # pragma: no cover
-    build_i2v_tab = None
-
 log = get_logger(__name__)
 
 _PIPELINE_CACHE: dict = {"pipeline": None, "signature": None}
@@ -90,7 +83,7 @@ def _build_settings(
     skin_detail,
     qc_second_pass, qc_sensitivity,
 ) -> config.Settings:
-    return config.Settings(
+    s = config.Settings(
         engine=engine,
         ff_swapper_model=ff_swapper_model,
         ff_pixel_boost=ff_pixel_boost,
@@ -130,6 +123,16 @@ def _build_settings(
         qc_second_pass=bool(qc_second_pass),
         qc_sensitivity=float(qc_sensitivity),
     )
+    # Aplica las claves AVANZADAS del preset de modo que NO tienen control en la UI
+    # (ángulos de detector, umbrales, peso del enhancer). Sin esto quedaban muertas:
+    # el preset solo aplicaba la mitad de sus ajustes. Solo se tocan campos SIN
+    # control propio, así no pisa elecciones manuales del usuario.
+    preset = config.EXPRESSION_PRESETS.get(expression_mode, {})
+    for k in ("ff_detector_angles", "ff_detector_score", "ff_landmarker_score",
+              "ff_temporal_fallback", "ff_enhancer_weight"):
+        if k in preset:
+            setattr(s, k, preset[k])
+    return s
 
 
 def _get_pipeline(settings: config.Settings, progress=None) -> SwapPipeline:
@@ -185,11 +188,11 @@ def _on_refresh_system() -> str:
 def _apply_expression_mode(mode: str):
     """Al elegir un Modo, rellena los controles con los valores recomendados."""
     preset = config.EXPRESSION_PRESETS.get(mode, config.EXPRESSION_PRESETS[config.EXPR_STANDARD])
-    eng = preset.get("engine", config.ENGINE_INSIGHTFACE)
+    eng = preset.get("engine", config.ENGINE_FACEFUSION)
     return (
         eng,
         preset.get("ff_swapper_model", "inswapper_128"),
-        preset.get("ff_pixel_boost", "256x256"),
+        preset.get("ff_pixel_boost", "native"),
         preset["enhancer_model"],
         preset["enhancer_blend"],
         preset.get("codeformer_fidelity", 0.7),
@@ -202,6 +205,8 @@ def _apply_expression_mode(mode: str):
         preset["two_pass_temporal"],
         preset["reference_count"],
         preset.get("ram_mode", config.RAM_BALANCED),
+        preset.get("memory_mode", config.MODE_BALANCED),
+        preset.get("reference_distance", 1.2),
         _recommendation(mode, eng),
     )
 
@@ -664,27 +669,38 @@ def build_interface() -> gr.Blocks:
             with gr.Column(scale=1, min_width=340):
                 with gr.Group():
                     gr.Markdown("#### ✨ Quality")
-                    engine = gr.Radio(
-                        choices=list(config.ENGINE_LABELS.items()),
-                        value=config.ENGINE_INSIGHTFACE,
-                        label="🧠 Motor de Face Swap",
-                        info="Rápido (InsightFace) ↔ Alta calidad (FaceFusion).",
-                    )
+                    # FaceFusion es el ÚNICO motor. engine/swapper_model quedan como
+                    # ESTADO OCULTO (no se eligen en la UI) para no duplicar el selector
+                    # de modelo: el swap se elige UNA sola vez con "Modelo de swap".
+                    engine = gr.State(config.ENGINE_FACEFUSION)
+                    swapper_model = gr.State("inswapper_128")
                     with gr.Row():
-                        swapper_model = gr.Dropdown(
-                            choices=config.SWAPPER_CHOICES, value="inswapper_128", label="Modelo de swap",
-                            info="Modelo que reemplaza la identidad (InsightFace). inswapper_128 = más compatible.",
+                        ff_swapper_model = gr.Dropdown(
+                            choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
+                            label="🧬 Modelo de swap",
+                            info="El modelo que reemplaza la identidad. inswapper_128 = el más ESTABLE "
+                                 "(no se 'mueve'). hififace / ghost_2 / ghost_3 (256 px) = más "
+                                 "identidad y forma (mejor con Pixel boost 512). El preset 🔥 MÁXIMO "
+                                 "usa hififace + 512.",
                         )
+                        ff_pixel_boost = gr.Dropdown(
+                            choices=config.FF_PIXEL_BOOST_CHOICES, value="native",
+                            label="🔎 Pixel boost (resolución interna del swap)",
+                            info="Auto = nativa del modelo (rápido). 512 = más detalle fino (la cara "
+                                 "se procesa en 4 pasadas entrelazadas → swap más lento). Combo de "
+                                 "máxima calidad: hififace + 512 + máscara bisenet.",
+                        )
+                    with gr.Row():
                         enhancer_model = gr.Dropdown(
                             choices=config.ENHANCER_CHOICES, value="gfpgan_1.4",
                             label="Enhancer (restaurador)",
                             info="GFPGAN = natural y rápido; CodeFormer = más nítido (mejor en dientes).",
                         )
-                    with gr.Row():
                         enhancer_blend = gr.Slider(
                             0.0, 1.0, value=0.8, step=0.05, label="Fuerza del enhancer",
                             info="Cuánto se mezcla el realce (0 = nada, 1 = máximo).",
                         )
+                    with gr.Row():
                         codeformer_fidelity = gr.Slider(
                             0.0, 1.0, value=0.7, step=0.05, label="Fidelidad CodeFormer",
                             info="Solo CodeFormer: 0 = más detalle/nítido, 1 = más fiel al original.",
@@ -735,21 +751,7 @@ def build_interface() -> gr.Blocks:
                             info="Encoge la máscara hacia dentro para no invadir pelo/frente/orejas.",
                         )
 
-                with gr.Accordion("⚙️ FaceFusion avanzado (resolución interna del swap)", open=False):
-                    gr.Markdown(config.ENGINE_INFO_MD)
-                    with gr.Row():
-                        ff_swapper_model = gr.Dropdown(
-                            choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
-                            label="Modelo de swap de FaceFusion",
-                            info="inswapper_128 = el más ESTABLE (no se 'mueve'). Para más identidad "
-                                 "con OJOS nítidos → ghost_3_256. simswap da un look suave (ojos "
-                                 "borrosos). Los de 256 px transfieren la forma → se mueven más en perfiles.",
-                        )
-                        ff_pixel_boost = gr.Dropdown(
-                            choices=config.FF_PIXEL_BOOST_CHOICES, value="256x256",
-                            label="Pixel boost (256/512 = más calidad, más VRAM)",
-                            info="Resolución interna del swap. Más alto = dientes/ojos más nítidos, más VRAM.",
-                        )
+                with gr.Accordion("⚙️ FaceFusion avanzado (boca / perfiles)", open=False):
                     with gr.Row():
                         use_mouth_pixel_boost = gr.Checkbox(
                             value=True, label="Pixel boost localizado de boca (512)",
@@ -860,12 +862,9 @@ def build_interface() -> gr.Blocks:
                     )
                     process_btn = gr.Button("🚀 Procesar vídeo completo", variant="primary")
 
-        # ===== Más modos: Imagen→Vídeo · comparar modelos · herramientas =====
+        # ===== Más modos: comparar modelos · herramientas =====
         gr.Markdown("### 🧭 Más modos y herramientas")
         with gr.Tabs():
-            if build_i2v_tab is not None:
-                with gr.Tab("🎞️ Imagen → Vídeo (Wan 2.2)"):
-                    build_i2v_tab()
             with gr.Tab("🔬 Comparar modelos"):
                 gr.Markdown(
                     "Probá varios modelos de swap sobre **tu** cara y **tu** video, en los mismos "
@@ -934,16 +933,13 @@ def build_interface() -> gr.Blocks:
                 enhancer_model, enhancer_blend, codeformer_fidelity, mask_mode,
                 eye_preservation, mouth_detail, color_match, temporal_alpha,
                 motion_adaptive, two_pass_temporal, reference_count, ram_mode,
+                memory_mode, reference_distance,
                 recommendation_md,
             ],
         )
-        engine.change(
-            _on_engine_change,
-            inputs=[engine, expression_mode],
-            outputs=[recommendation_md, two_pass_temporal],
-        )
+        # (Sin selector de motor: FaceFusion es el único; ``engine`` es State oculto.)
         _mem_inputs = [engine, ram_mode, memory_mode, force_cpu]
-        for _comp in (engine, ram_mode, memory_mode, force_cpu):
+        for _comp in (ram_mode, memory_mode, force_cpu):
             _comp.change(_memory_panel, inputs=_mem_inputs, outputs=mem_info_md)
 
         preview_btn.click(

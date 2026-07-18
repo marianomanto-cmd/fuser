@@ -54,3 +54,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+Fuser.bat
+fuser.ico

@@ -295,11 +295,13 @@ MASK_MODE_LABELS: Dict[str, str] = {
 EXPR_STANDARD = "standard"
 EXPR_MUSIC_VIDEO = "music_video"
 EXPR_HIGH_EXPRESSION = "high_expression"
+EXPR_MAX = "max"
 
 EXPRESSION_MODE_LABELS: Dict[str, str] = {
-    "Estándar": EXPR_STANDARD,
+    "🔥 MÁXIMO (hififace + pixel boost 512 + todo al máximo)": EXPR_MAX,
     "🎤 Videos musicales (caras cantando)": EXPR_MUSIC_VIDEO,
     "😮 Alta expresión (boca/ojos extremos)": EXPR_HIGH_EXPRESSION,
+    "Estándar (rápido)": EXPR_STANDARD,
 }
 
 # Valores recomendados que la UI aplica al elegir un modo de expresión.
@@ -308,8 +310,31 @@ EXPRESSION_MODE_LABELS: Dict[str, str] = {
 # Nota: "facefusion"/"insightface" son los valores de ENGINE_* (definidos más
 # abajo); se usan como literales aquí porque este dict se evalúa antes.
 EXPRESSION_PRESETS: Dict[str, dict] = {
+    # 🔥 MÁXIMO: combo de máxima calidad — hififace (transfiere forma/identidad) a
+    # pixel boost 512 (4 pasadas entrelazadas) + máscara bisenet + occluder xseg,
+    # CodeFormer restaurando detalle (dientes/ojos), multi-referencia (TODAS las
+    # fotos), recuperación de ángulos completa, 2 pasadas temporales y RAM+VRAM al
+    # máximo. Es el más LENTO; para el render final de máxima fidelidad.
+    EXPR_MAX: dict(
+        engine="facefusion",
+        ff_swapper_model="hififace_unofficial_256", ff_pixel_boost="512x512",
+        enhancer_model="codeformer", enhancer_blend=1.0, codeformer_fidelity=0.5,
+        ff_enhancer_weight=0.2,       # CodeFormer restaura MÁS detalle (dientes/ojos nítidos)
+        ff_detector_angles=(0, 90, 180, 270),  # recupera perfiles/cabeza atrás en todas direcciones
+        ff_detector_score=0.3, ff_landmarker_score=0.2, ff_temporal_fallback=True,
+        reference_distance=0.9,       # no pierde el swap en perfiles/movimiento
+        mask_mode=MASK_PARSING,       # segmentación bisenet (contorno fino)
+        eye_preservation=0.9, mouth_detail=1.0,
+        color_match=True,
+        temporal_smoothing=True, temporal_alpha=0.4,
+        motion_adaptive=True, two_pass_temporal=True,
+        reference_count=0,            # 0 = usa TODAS las fotos subidas (multi-ref = +identidad)
+        ram_mode=RAM_MAX,             # exprime los 40 GB de RAM
+        memory_mode=MODE_MAX_QUALITY, # exprime la VRAM (arena grande, enhancer en GPU)
+    ),
     EXPR_STANDARD: dict(
-        engine="insightface",
+        engine="facefusion",
+        ff_swapper_model="inswapper_128", ff_pixel_boost="native",
         enhancer_model="gfpgan_1.4", enhancer_blend=0.8,
         mask_mode=MASK_HULL, eye_preservation=0.35, mouth_detail=0.35,
         color_match=False, temporal_smoothing=True, temporal_alpha=0.55,
@@ -325,7 +350,7 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         # medido). La nitidez la pone CodeFormer a 512. Para más identidad/detalle a
         # costa de algo de estabilidad, elegí un modelo de 256 px o usá 🔬 Comparar
         # modelos sobre TU material.
-        ff_swapper_model="inswapper_128", ff_pixel_boost="256x256",
+        ff_swapper_model="inswapper_128", ff_pixel_boost="native",
         enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.5,
         ff_enhancer_weight=0.5,      # CodeFormer nativo hacia "detalle" -> dientes nítidos
         ff_detector_angles=(0, 90, 270),  # recupera caras inclinadas / cabeza atrás
@@ -344,7 +369,7 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
     ),
     EXPR_HIGH_EXPRESSION: dict(
         engine="facefusion",
-        ff_swapper_model="inswapper_128", ff_pixel_boost="256x256",
+        ff_swapper_model="inswapper_128", ff_pixel_boost="native",
         enhancer_model="codeformer", enhancer_blend=0.9, codeformer_fidelity=0.5,
         ff_enhancer_weight=0.5,
         ff_detector_angles=(0, 90, 180, 270),  # máxima recuperación de ángulos
@@ -443,9 +468,10 @@ FF_SWAPPER_NATIVE_RES = {
     "simswap_unofficial_512": 512,
 }  # el resto (hififace/ghost/simswap_256/uniface/blendswap) -> 256
 FF_PIXEL_BOOST_CHOICES = [
-    ("128x128 (rápido, menos VRAM)", "128x128"),
-    ("256x256 (recomendado)", "256x256"),
-    ("512x512 (máxima calidad, más VRAM)", "512x512"),
+    ("Auto — resolución nativa del modelo (rápido, recomendado)", "native"),
+    ("128x128 (solo inswapper)", "128x128"),
+    ("256x256", "256x256"),
+    ("512x512 — máx. detalle (swap ~4× más lento en modelos de 256)", "512x512"),
 ]
 
 # Perfil de memoria recomendado POR MOTOR (vista de alto nivel, legible).
@@ -480,9 +506,9 @@ class Settings:
     """Conjunto completo de parámetros de un trabajo de face swap."""
 
     # --- Motor de face swap ---
-    engine: str = ENGINE_INSIGHTFACE
+    engine: str = ENGINE_FACEFUSION  # FaceFusion es el ÚNICO motor expuesto en la UI
     ff_swapper_model: str = "inswapper_128"  # solo FaceFusion
-    ff_pixel_boost: str = "256x256"          # solo FaceFusion (resolución del swap)
+    ff_pixel_boost: str = "native"           # "native" = resolución nativa del modelo
     ff_auto_install: bool = True             # auto-instalar FaceFusion al usarlo
     # FaceFusion: detección robusta para cabeza atrás / ángulos extremos.
     ff_detector_angles: tuple = (0,)         # rotaciones del detector (+ángulos = +recall en caras inclinadas)
