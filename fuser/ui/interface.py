@@ -132,7 +132,7 @@ def _build_settings(
     # control propio, así no pisa elecciones manuales del usuario.
     preset = config.EXPRESSION_PRESETS.get(expression_mode, {})
     for k in ("ff_detector_angles", "ff_detector_score", "ff_landmarker_score",
-              "ff_temporal_fallback", "ff_enhancer_weight",
+              "ff_temporal_fallback", "ff_enhancer_weight", "ff_geometry_mask",
               "ff_occluder_model", "color_harmonize", "color_harmonize_strength"):
         if k in preset:
             setattr(s, k, preset[k])

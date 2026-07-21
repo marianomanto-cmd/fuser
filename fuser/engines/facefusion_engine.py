@@ -529,7 +529,18 @@ class FaceFusionSwapper(BaseFaceSwapper):
         occluder = s.ff_occluder_model if s.ff_occluder_model in ("xseg_1", "xseg_2") else "xseg_1"
         self._set("face_occluder_model", occluder)            # oclusión pelo/manos/micro (xseg_2 = más fino)
         self._set("face_parser_model", "bisenet_resnet_34")   # parser de cara más fino
-        if shape_transfer:
+        if shape_transfer and getattr(s, "ff_geometry_mask", False):
+            # PRIORIDAD GEOMETRÍA (modo 🎯 Maximum Identity): queremos que la FORMA
+            # nueva (nariz/mandíbula/cráneo de la FUENTE) SE VEA. La máscara de
+            # región (parser) se ajusta a la silueta del OBJETIVO y RECORTA esa forma
+            # nueva (verificado: es lo que hacía "seguir pareciendo el original").
+            # Aquí NO usamos región ni retracción de padding: solo box (contorno del
+            # crop swapeado) + occlusion (pelo/manos/micro). Acepta algo más de
+            # "spill" en movimiento extremo a cambio de respetar la geometría.
+            self._set("face_mask_types", ["box", "occlusion"])
+            self._set("face_mask_padding", (0, 2, 0, 2))
+            self._set("face_mask_blur", float(np.clip(max(s.mask_blur, 0.30), 0.0, 1.0)))
+        elif shape_transfer:
             self._set("face_mask_types", ["box", "occlusion", "region"])  # box + padding
             # (top, right, bottom, left) en %. Bottom alto retrae fuera del mentón/cuello;
             # laterales para que la mandíbula no invada; top suave (no cortar la frente).
