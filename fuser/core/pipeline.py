@@ -100,6 +100,9 @@ class SwapPipeline:
             s.engine, s.ff_swapper_model, s.ff_pixel_boost,
             s.swapper_model, s.enhancer_model, s.memory_mode,
             s.force_cpu, round(s.gpu_mem_limit_gb, 2), s.det_size,
+            # El Deep Swapper carga un .dfm distinto -> cambiar de modelo debe RECARGAR
+            # (para que corra pre_check y baje/valide el .dfm).
+            getattr(s, "ff_deep_swapper_model", ""),
         )
 
     def update_runtime(self, settings: Settings) -> None:

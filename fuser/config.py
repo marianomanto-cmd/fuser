@@ -613,6 +613,13 @@ class Settings:
     # 1.35·foto − 0.35·video (resta la identidad del video). Ver engine
     # _register_swapper_weight. Anti "sigue pareciéndose al video".
     ff_swapper_weight: float = 0.5
+    # Deep Swapper (.dfm de DeepFaceLive): modelo entrenado POR IDENTIDAD (geometría
+    # de cráneo/nariz completa). "" = desactivado (usa el swapper one-shot normal);
+    # si tiene un id ("custom/<nombre>" o famoso "iperov/…"), el motor usa el Deep
+    # Swapper en vez del face_swapper. NO usa la foto fuente (identidad horneada en
+    # el .dfm). morph 0-100 = cuánto empuja hacia la identidad entrenada.
+    ff_deep_swapper_model: str = ""
+    ff_deep_swapper_morph: int = 80
     # Cadena de 2 modelos (modo Máxima Identidad PRO): pasada 1 = hififace impone la
     # FORMA (nariz/cráneo de la foto); pasada 2 = inswapper reinyecta TEXTURA/nitidez
     # tratando esa salida como objetivo (preserva la forma nueva). Medido: id 0.712

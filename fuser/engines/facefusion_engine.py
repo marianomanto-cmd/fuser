@@ -258,7 +258,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
                 except Exception:
                     continue
             # Procesadores (3.x: processors.modules; 2.x: processors.frame.modules).
-            swapper = enhancer = None
+            swapper = enhancer = deep_swapper = None
             for base in ("facefusion.processors.modules", "facefusion.processors.frame.modules"):
                 try:
                     swapper = importlib.import_module(base + ".face_swapper")
@@ -266,11 +266,18 @@ class FaceFusionSwapper(BaseFaceSwapper):
                     break
                 except Exception:
                     continue
+            # Deep Swapper (.dfm): opcional — solo existe en FaceFusion 3.1.0+.
+            for base in ("facefusion.processors.modules", "facefusion.processors.frame.modules"):
+                try:
+                    deep_swapper = importlib.import_module(base + ".deep_swapper")
+                    break
+                except Exception:
+                    continue
             if not (state_manager and face_analyser and swapper):
                 raise ImportError("módulos internos de FaceFusion no encontrados")
             self._modules = dict(
                 state=state_manager, face_analyser=face_analyser,
-                swapper=swapper, enhancer=enhancer,
+                swapper=swapper, enhancer=enhancer, deep_swapper=deep_swapper,
             )
         except Exception as exc:  # pragma: no cover - depende de la instalación
             raise FaceFusionNotAvailable(str(exc))
@@ -511,6 +518,13 @@ class FaceFusionSwapper(BaseFaceSwapper):
 
         # Swapper + pixel boost (clave de calidad: corre el swap a mayor resolución).
         self._set("face_swapper_model", s.ff_swapper_model)
+        # Deep Swapper (.dfm): si está activo, fijamos modelo + morph. No usa la foto
+        # fuente. 'one' = swapea la cara más prominente (robusto para video de una
+        # persona; el Deep Swapper no necesita referencia).
+        if self._deep_swapper_active():
+            self._set("deep_swapper_model", s.ff_deep_swapper_model)
+            self._set("deep_swapper_morph", int(np.clip(s.ff_deep_swapper_morph, 0, 100)))
+            self._set("face_selector_mode", "one")
         # Pixel boost = resolución interna del swap. Consciente del modelo: cada
         # swapper tiene una resolución NATIVA mínima (inswapper 128; hififace/ghost/
         # simswap_256/uniface 256; simswap_512 512) y nunca bajamos de ella.
@@ -624,7 +638,11 @@ class FaceFusionSwapper(BaseFaceSwapper):
         if progress:
             progress(0.5, "Descargando/preparando modelos de FaceFusion…")
         # pre_check descarga modelos y valida; lo llamamos por módulo si existe.
-        for key in ("swapper", "enhancer"):
+        # deep_swapper solo si está activo (evita bajar un .dfm por defecto sin uso).
+        pre_keys = ["swapper", "enhancer"]
+        if self._deep_swapper_active():
+            pre_keys.append("deep_swapper")
+        for key in pre_keys:
             mod = self._modules.get(key)
             if mod is not None and hasattr(mod, "pre_check"):
                 try:
@@ -693,14 +711,27 @@ class FaceFusionSwapper(BaseFaceSwapper):
             # Variante posicional (target_vision_frame,)
             return fn(inputs.get("target_vision_frame"))
 
+    def _deep_swapper_active(self) -> bool:
+        """True si hay que usar el Deep Swapper (.dfm) en vez del swapper one-shot."""
+        return bool(getattr(self.settings, "ff_deep_swapper_model", "") or "") \
+            and self._modules.get("deep_swapper") is not None
+
     def _ff_swap(self, frame: np.ndarray) -> np.ndarray:
-        """Swap + enhancer nativos de FaceFusion sobre un frame completo."""
-        inputs = {
-            "reference_faces": None,
-            "source_face": self._source_face,
-            "target_vision_frame": frame,
-        }
-        out = self._run_module(self._modules["swapper"], inputs)
+        """Swap + enhancer nativos de FaceFusion sobre un frame completo.
+
+        Con ``ff_deep_swapper_model`` usa el Deep Swapper (.dfm entrenado por
+        identidad: NO usa la foto fuente); si no, el swapper one-shot normal.
+        """
+        if self._deep_swapper_active():
+            out = self._run_module(self._modules["deep_swapper"],
+                                   {"reference_faces": None, "target_vision_frame": frame})
+        else:
+            inputs = {
+                "reference_faces": None,
+                "source_face": self._source_face,
+                "target_vision_frame": frame,
+            }
+            out = self._run_module(self._modules["swapper"], inputs)
         out = out if out is not None else frame
         enhancer = self._modules.get("enhancer")
         if enhancer is not None and self.settings.enhancer_model != "none":
@@ -712,7 +743,8 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def process_frame(self, frame: np.ndarray, use_smoothing: bool = True) -> np.ndarray:
         if not self._loaded:
             self.load()
-        if self._source_face is None:
+        # El Deep Swapper NO necesita cara fuente (la identidad vive en el .dfm).
+        if self._source_face is None and not self._deep_swapper_active():
             raise RuntimeError("Falta la cara fuente (FaceFusion). Sube imágenes fuente primero.")
         out = self._ff_swap(frame)
         # Post-procesado: detectar sobre la salida para alinear el realce de regiones.

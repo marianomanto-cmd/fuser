@@ -178,30 +178,53 @@ def _resolve_source_paths(source_files, face_choice) -> List[str]:
     return out
 
 
+def _apply_dfm(settings: config.Settings, face_choice) -> Optional[str]:
+    """Si la Cara elegida tiene un .dfm entrenado, activa el Deep Swapper con él.
+
+    Debe llamarse ANTES de _get_pipeline (el model_signature incluye el .dfm, así
+    que activa la recarga del pipeline con el modelo correcto). Devuelve el
+    model_id del .dfm o None (one-shot normal).
+    """
+    dfm = face_library.dfm_of(face_choice) if (face_choice and face_choice != NO_FACE) else None
+    settings.ff_deep_swapper_model = dfm or ""
+    return dfm
+
+
 def _prepare(pipeline: SwapPipeline, source_files, video_path, face_choice=None) -> str:
     """Valida entradas, prepara la cara fuente (multi-ref) y devuelve un resumen.
 
     La fuente puede venir de una **Cara guardada** (Biblioteca de Caras) o de las
     fotos subidas. ``face_choice`` tiene prioridad si apunta a una cara real.
     """
-    source_paths = _resolve_source_paths(source_files, face_choice)
-    if not source_paths:
-        raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
     if not video_path:
         raise gr.Error("Sube un vídeo objetivo.")
+    # Deep Swapper (.dfm): la identidad vive en el modelo entrenado; NO necesita
+    # fotos fuente. La Cara puede tener fotos igual (para el one-shot) pero acá se
+    # ignoran; preparamos la fuente si hay, sin bloquear si falla.
+    deep = getattr(pipeline.settings, "ff_deep_swapper_model", "") or ""
+
+    source_paths = _resolve_source_paths(source_files, face_choice)
+    if not source_paths and not deep:
+        raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
 
     images = []
     for path in source_paths:
         img = _read_image(path) if path else None
         if img is not None:
             images.append(img)
-    if not images:
+
+    stats = None
+    if images:
+        try:
+            stats = pipeline.prepare_source(images)
+        except ValueError as exc:
+            if not deep:
+                raise gr.Error(str(exc))
+    elif not deep:
         raise gr.Error("No se pudieron leer las imágenes fuente.")
 
-    try:
-        stats = pipeline.prepare_source(images)
-    except ValueError as exc:
-        raise gr.Error(str(exc))
+    if deep:
+        return f"🧬 Modelo entrenado (.dfm): {deep} · la geometría viene del modelo, no de fotos."
 
     if pipeline.settings.face_selector == config.FACE_SELECTOR_REFERENCE:
         info = videoutil.probe(video_path)
@@ -219,35 +242,59 @@ def _on_refresh_system() -> str:
     return format_system_summary()
 
 
+def _dfm_library_status() -> str:
+    """Resumen de qué Caras tienen un .dfm entrenado asociado."""
+    faces = face_library.list_faces()
+    withdfm = [n for n in faces if face_library.has_dfm(n)]
+    if not withdfm:
+        return "*(ninguna Cara tiene modelo `.dfm` todavía)*"
+    return "🧬 Con modelo entrenado: " + ", ".join(f"**{n}**" for n in withdfm)
+
+
+def _on_import_dfm(cara, dfm_file):
+    """Asocia un .dfm entrenado a una Cara existente."""
+    path = dfm_file if isinstance(dfm_file, str) else getattr(dfm_file, "name", None)
+    try:
+        msg = face_library.set_dfm(cara, path)
+    except ValueError as exc:
+        return f"⚠️ {exc}", gr.update()
+    return f"{msg}\n\n{_dfm_library_status()}", gr.update(value=None)
+
+
 def _on_save_face(name, files):
     """Guarda/reemplaza una Cara de la Biblioteca y refresca los desplegables."""
     paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in (files or [])]
     try:
         msg = face_library.save_face(name, paths)
     except ValueError as exc:
-        return gr.update(), gr.update(), f"⚠️ {exc}", gr.update()
+        return gr.update(), gr.update(), f"⚠️ {exc}", gr.update(), gr.update()
     faces = face_library.list_faces()
     return (
         gr.update(choices=[NO_FACE] + faces, value=(name or "").strip()),  # face_choice: auto-selecciona
         gr.update(choices=faces, value=None),                              # lib_delete
         msg,
         gr.update(value=None),                                             # limpia el uploader de la biblioteca
+        gr.update(choices=faces),                                          # dfm_cara
     )
 
 
 def _on_delete_face(name):
-    """Borra una Cara guardada y refresca los desplegables."""
+    """Borra una Cara guardada y refresca los desplegables.
+
+    Salidas (orden fijo): [face_choice, lib_delete, dfm_cara, lib_status].
+    """
     if not name:
-        return gr.update(), gr.update(), "⚠️ Elegí una cara para borrar."
+        return gr.update(), gr.update(), gr.update(), "⚠️ Elegí una cara para borrar."
     try:
         msg = face_library.delete_face(name)
     except ValueError as exc:
-        return gr.update(), gr.update(), f"⚠️ {exc}"
+        return gr.update(), gr.update(), gr.update(), f"⚠️ {exc}"
     faces = face_library.list_faces()
     return (
         gr.update(choices=[NO_FACE] + faces, value=NO_FACE),  # face_choice
         gr.update(choices=faces, value=None),                 # lib_delete
-        msg,
+        gr.update(choices=faces, value=None),                 # dfm_cara
+        msg,                                                  # lib_status
     )
 
 
@@ -336,6 +383,7 @@ def _memory_panel(engine: str, ram_mode: str, memory_mode: str, force_cpu: bool)
 
 def _on_preview(source_files, face_choice, video_path, n_preview, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
+    _apply_dfm(settings, face_choice)
     try:
         progress(0.02, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.4, desc=m))
@@ -435,6 +483,7 @@ def _process_chain(base, source_files, face_choice, video_path, progress):
 
 def _on_process(source_files, face_choice, video_path, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
+    _apply_dfm(settings, face_choice)
     try:
         if getattr(settings, "chain_shape_then_texture", False):
             progress(0.0, desc="🎯➕ Cadena forma+textura (2 pasadas)…")
@@ -488,6 +537,7 @@ def _on_maximum_swap(source_files, face_choice, video_path, progress=gr.Progress
     central y registra los ajustes exactos (reproducibilidad).
     """
     settings = _max_settings()
+    _apply_dfm(settings, face_choice)
     try:
         progress(0.0, desc="🚀 Etapa 1/5 · Cargando modelos (swap + xseg_2 + bisenet + CodeFormer)…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.12, desc=f"🚀 Etapa 1/5 · {m}"))
@@ -559,6 +609,7 @@ def _on_process_queue(source_files, face_choice, video_queue, *control_values, p
     Es un *generator*: va emitiendo (resultados, estado) tras cada video.
     """
     settings = _build_settings(*control_values)
+    _apply_dfm(settings, face_choice)
     source_paths = _resolve_source_paths(source_files, face_choice)
     if not source_paths:
         raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
@@ -877,6 +928,21 @@ def build_interface() -> gr.Blocks:
                         )
                         lib_delete_btn = gr.Button("🗑️ Borrar", scale=1)
                     lib_status = gr.Markdown("", elem_classes="fuser-soft")
+                with gr.Accordion("🧬 Modelo entrenado (.dfm) — máxima geometría", open=False):
+                    gr.Markdown(
+                        "Si entrenaste un **`.dfm`** de esta persona (DeepFaceLab — ver guía "
+                        "`TRAIN_DFM.md`), importalo acá y la Cara swapea con **geometría de cráneo "
+                        "completa** (Deep Swapper), ignorando las fotos. Entrenar es aparte (CUDA/nube); "
+                        "*usarlo* corre en tu GPU. Reiniciá Fuser tras importar.",
+                        elem_classes="fuser-soft",
+                    )
+                    with gr.Row():
+                        dfm_cara = gr.Dropdown(
+                            choices=face_library.list_faces(), label="Cara destino", scale=3,
+                        )
+                        dfm_file = gr.File(label=".dfm", file_types=[".dfm"], type="filepath", scale=2)
+                    dfm_import_btn = gr.Button("🧬 Asociar .dfm a la Cara", variant="secondary")
+                    dfm_status = gr.Markdown(_dfm_library_status(), elem_classes="fuser-soft")
                 with gr.Group():
                     gr.Markdown("#### 🎬 Target Video")
                     target_video = gr.Video(label="Vídeo objetivo")
@@ -1214,12 +1280,17 @@ def build_interface() -> gr.Blocks:
         lib_save_btn.click(
             _on_save_face,
             inputs=[lib_name, lib_files],
-            outputs=[face_choice, lib_delete, lib_status, lib_files],
+            outputs=[face_choice, lib_delete, lib_status, lib_files, dfm_cara],
         )
         lib_delete_btn.click(
             _on_delete_face,
             inputs=lib_delete,
-            outputs=[face_choice, lib_delete, lib_status],
+            outputs=[face_choice, lib_delete, dfm_cara, lib_status],
+        )
+        dfm_import_btn.click(
+            _on_import_dfm,
+            inputs=[dfm_cara, dfm_file],
+            outputs=[dfm_status, dfm_file],
         )
 
         preview_btn.click(

@@ -31,6 +31,11 @@ IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 MANIFEST = "manifest.json"
 MAX_IMAGES = 40  # tope sano de fotos por cara (multi-ref satura mucho antes)
 
+# Carpeta donde el Deep Swapper de FaceFusion escanea los .dfm entrenados por el
+# usuario. create_static_model_set() los registra como model_id "custom/<slug>".
+# (.assets/models es un junction a E: en esta máquina; escribir aquí es correcto.)
+FF_CUSTOM_DFM_DIR = config.PROJECT_ROOT / "vendor" / "facefusion" / ".assets" / "models" / "custom"
+
 
 def _slug(name: str) -> str:
     """Nombre de carpeta seguro y estable a partir del nombre visible."""
@@ -134,6 +139,69 @@ def delete_face(name: str) -> str:
     d = face_dir(name)
     if not d.is_dir():
         raise ValueError(f"No existe la cara «{name}».")
+    # borra también el .dfm asociado en la carpeta custom de FaceFusion
+    man = _read_manifest(d) or {}
+    if man.get("dfm"):
+        dfm = FF_CUSTOM_DFM_DIR / (_slug(name) + ".dfm")
+        try:
+            dfm.unlink()
+        except OSError:
+            pass
     shutil.rmtree(d, ignore_errors=True)
     log.info("Cara '%s' borrada (%s)", name, d)
     return f"🗑️ Cara «{name}» borrada."
+
+
+# --- Modelo entrenado (.dfm) por Cara -------------------------------------------
+# Cada Cara puede tener un .dfm (DeepFaceLive) entrenado para esa identidad. El
+# Deep Swapper de FaceFusion lo usa (geometría de cráneo completa) en vez del
+# swapper one-shot. El .dfm se copia a la carpeta custom de FaceFusion y el
+# model_id ("custom/<slug>") se guarda en manifest['dfm'].
+
+def dfm_of(name: str):
+    """model_id del .dfm de una Cara ("custom/<slug>") o None si no tiene."""
+    d = face_dir(name)
+    if not d.is_dir():
+        return None
+    man = _read_manifest(d) or {}
+    model_id = man.get("dfm")
+    if not model_id:
+        return None
+    # verificá que el archivo siga existiendo (si no, tratamos la Cara como one-shot)
+    dfm = FF_CUSTOM_DFM_DIR / (_slug(name) + ".dfm")
+    return model_id if dfm.is_file() else None
+
+
+def has_dfm(name: str) -> bool:
+    return dfm_of(name) is not None
+
+
+def set_dfm(name: str, dfm_path: str) -> str:
+    """Importa un .dfm entrenado y lo asocia a una Cara existente.
+
+    Copia el archivo a la carpeta custom de FaceFusion como ``<slug>.dfm`` y
+    escribe ``manifest['dfm'] = 'custom/<slug>'``. Al reiniciar Fuser, el Deep
+    Swapper lo registra como ``custom/<slug>`` sin editar código.
+    """
+    name = (name or "").strip()
+    d = face_dir(name)
+    if not d.is_dir():
+        raise ValueError(f"No existe la cara «{name}». Guardala primero con sus fotos.")
+    if not dfm_path or Path(dfm_path).suffix.lower() != ".dfm" or not Path(dfm_path).is_file():
+        raise ValueError("Subí un archivo .dfm válido (el modelo entrenado en DeepFaceLab).")
+    size = Path(dfm_path).stat().st_size
+    if size < 1_000_000:  # un .dfm real pesa decenas-cientos de MB
+        raise ValueError("El .dfm parece truncado/corrupto (demasiado chico). Reintentá la copia.")
+
+    slug = _slug(name)
+    FF_CUSTOM_DFM_DIR.mkdir(parents=True, exist_ok=True)
+    dst = FF_CUSTOM_DFM_DIR / f"{slug}.dfm"
+    shutil.copyfile(dfm_path, dst)
+
+    man = _read_manifest(d) or {"name": name, "slug": slug}
+    man["dfm"] = f"custom/{slug}"
+    man["dfm_size_mb"] = round(size / 1_048_576, 1)
+    with open(d / MANIFEST, "w", encoding="utf-8") as fh:
+        json.dump(man, fh, ensure_ascii=False, indent=2)
+    log.info("Cara '%s': .dfm importado (%s, %.1f MB) -> custom/%s", name, dst, size / 1_048_576, slug)
+    return f"🧬 Modelo .dfm asociado a «{name}» ({man['dfm_size_mb']} MB). Reiniciá Fuser para usarlo."
