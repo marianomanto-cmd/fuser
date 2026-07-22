@@ -26,13 +26,16 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 MODELS_DIR = Path(os.environ.get("FUSER_MODELS_DIR", PROJECT_ROOT / "models")).resolve()
 OUTPUTS_DIR = Path(os.environ.get("FUSER_OUTPUT_DIR", PROJECT_ROOT / "outputs")).resolve()
 TEMP_DIR = Path(os.environ.get("FUSER_TEMP_DIR", PROJECT_ROOT / "tmp")).resolve()
+# Biblioteca de Caras: identidades fuente guardadas (multi-referencia) que el
+# usuario elige en la UI en vez de subir fotos cada vez (ver core/face_library.py).
+FACES_DIR = Path(os.environ.get("FUSER_FACES_DIR", PROJECT_ROOT / "faces")).resolve()
 # InsightFace busca aquí los packs de detección (buffalo_l, etc.).
 INSIGHTFACE_ROOT = Path(os.environ.get("FUSER_INSIGHTFACE_ROOT", MODELS_DIR)).resolve()
 
 
 def ensure_dirs() -> None:
     """Crea las carpetas de trabajo si no existen."""
-    for d in (MODELS_DIR, OUTPUTS_DIR, TEMP_DIR):
+    for d in (MODELS_DIR, OUTPUTS_DIR, TEMP_DIR, FACES_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -334,6 +337,11 @@ EXPRESSION_PRESETS: Dict[str, dict] = {
         engine="facefusion",
         ff_swapper_model="hififace_unofficial_256", ff_pixel_boost="512x512",
         ff_geometry_mask=True,        # máscara BOX: deja pasar nariz/mandíbula/cráneo de la foto
+        # Empuje anti-objetivo del embedding (backport de --face-swapper-weight
+        # 3.4.0): 0.9 ≈ 1.3·foto − 0.3·video. RESTA la identidad del video. Es la
+        # palanca directa contra "sigue pareciéndose al video". 0.9 (no 1.0) para
+        # no meter jitter de identidad en videoclip (resta el objetivo por-frame).
+        ff_swapper_weight=0.9,
         enhancer_model="codeformer", enhancer_blend=0.7, codeformer_fidelity=0.5,
         ff_enhancer_weight=0.7,       # FIEL a hififace (no re-embellece hacia genérico)
         ff_detector_angles=(0, 90, 180, 270),
@@ -575,6 +583,11 @@ class Settings:
     ff_landmarker_score: float = 0.5         # umbral de landmarks (bajo = no descarta la cara en cabeza-atrás)
     # FaceFusion: nitidez del enhancer nativo (CodeFormer). 0 = detalle/nítido, 1 = fiel a la entrada (borrosa).
     ff_enhancer_weight: float = 0.8
+    # Backport de --face-swapper-weight (FF 3.4.0): empuja el embedding de identidad
+    # de la FUENTE lejos del OBJETIVO. 0.5 = neutro (fuente pura, original); 1.0 =
+    # 1.35·foto − 0.35·video (resta la identidad del video). Ver engine
+    # _register_swapper_weight. Anti "sigue pareciéndose al video".
+    ff_swapper_weight: float = 0.5
     ff_temporal_fallback: bool = True        # rellena huecos de detección reusando los últimos kps (anti-salto)
     ff_occluder_model: str = "xseg_1"        # oclusor (pelo/manos/micro): xseg_2 = más fino (modo MÁXIMO)
     # PRIORIDAD GEOMETRÍA (modo 🎯 Máxima Identidad): con modelos que transfieren

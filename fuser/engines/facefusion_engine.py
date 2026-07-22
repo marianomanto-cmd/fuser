@@ -366,6 +366,52 @@ class FaceFusionSwapper(BaseFaceSwapper):
         except Exception as exc:  # pragma: no cover - degradación: sin hyperswap
             log.warning("No se pudo registrar hyperswap (%s); sigue disponible el resto.", exc)
 
+    def _register_swapper_weight(self) -> None:
+        """Backport de ``--face-swapper-weight`` (FaceFusion 3.4.0) a la 3.1.1.
+
+        Empuja el vector de identidad ArcFace de la FUENTE *lejos* del OBJETIVO
+        antes de swapear (extrapolación anti-objetivo del embedding), sin tocar
+        píxeles ni añadir modelo. Con ``ff_swapper_weight`` (0..1):
+          - 0.5 = neutro (fuente pura, comportamiento original).
+          - 1.0 = emb ← 1.35·foto − 0.35·video (RESTA la identidad del video y
+            amplifica la de la foto) → ataca directo el "sigue pareciéndose al
+            video". <0.5 iría hacia el video (no lo usamos).
+        Puro numpy → DirectML-safe y CERO jitter (transforma un embedding FIJO
+        por fuente, uno para todo el clip). Sirve para inswapper Y hififace: ambos
+        leen ``source_face.embedding`` crudo (inswapper directo; hififace vía
+        ``convert_embedding``), y en hififace además empuja la FORMA (su embedding
+        conduce el 3DMM). Idempotente vía ``_fuser_weight``. Réplica de
+        ``balance_source_embedding`` de 3.4.0 (interp [0.35,-0.35] + target L2).
+        """
+        fs = self._modules.get("swapper")
+        if fs is None or getattr(fs, "_fuser_weight", False):
+            return
+        orig_swap_face = fs.swap_face
+
+        def swap_face_weighted(source_face, target_face, temp_vision_frame):
+            w = float(getattr(self.settings, "ff_swapper_weight", 0.5))
+            emb = getattr(source_face, "embedding", None)
+            temb = getattr(target_face, "embedding", None)
+            if abs(w - 0.5) > 1e-3 and emb is not None and temb is not None:
+                # fsw = interp(w,[0,1],[+0.35,-0.35]); w>0.5 → fsw<0 → anti-objetivo.
+                fsw = float(np.interp(w, [0.0, 1.0], [0.35, -0.35]))
+                s = np.asarray(emb, dtype=np.float32)
+                t = np.asarray(temb, dtype=np.float32)
+                tn = t / (float(np.linalg.norm(t)) + 1e-8)
+                mixed = s * (1.0 - fsw) + float(np.linalg.norm(s)) * tn * fsw
+                try:
+                    source_face = source_face._replace(
+                        embedding=mixed,
+                        normed_embedding=mixed / (float(np.linalg.norm(mixed)) + 1e-8),
+                    )
+                except Exception:  # pragma: no cover - Face no es NamedTuple
+                    pass
+            return orig_swap_face(source_face, target_face, temp_vision_frame)
+
+        fs.swap_face = swap_face_weighted
+        fs._fuser_weight = True
+        log.info("face_swapper_weight backport activo (extrapolación anti-objetivo del embedding).")
+
     def _set(self, key: str, value) -> None:
         """Fija un item del state_manager de FaceFusion de forma tolerante."""
         state = self._modules["state"]
@@ -572,6 +618,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
             progress(0.2, "Importando FaceFusion…")
         self._import()
         self._register_hyperswap()
+        self._register_swapper_weight()
         self._init_ff_defaults()
         self._configure()
         if progress:

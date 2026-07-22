@@ -26,6 +26,7 @@ import gradio as gr
 import numpy as np
 
 from .. import __app_name__, __version__, config
+from ..core import face_library
 from ..core.pipeline import SwapPipeline
 from ..utils import video as videoutil
 from ..utils.logging import get_logger
@@ -133,6 +134,7 @@ def _build_settings(
     preset = config.EXPRESSION_PRESETS.get(expression_mode, {})
     for k in ("ff_detector_angles", "ff_detector_score", "ff_landmarker_score",
               "ff_temporal_fallback", "ff_enhancer_weight", "ff_geometry_mask",
+              "ff_swapper_weight",
               "ff_occluder_model", "color_harmonize", "color_harmonize_strength"):
         if k in preset:
             setattr(s, k, preset[k])
@@ -152,16 +154,44 @@ def _get_pipeline(settings: config.Settings, progress=None) -> SwapPipeline:
     return pipeline
 
 
-def _prepare(pipeline: SwapPipeline, source_files, video_path) -> str:
-    """Valida entradas, prepara la cara fuente (multi-ref) y devuelve un resumen."""
-    if not source_files:
-        raise gr.Error("Sube al menos una imagen fuente (la cara a aplicar).")
+# Valor "sin cara guardada" del desplegable de la Biblioteca de Caras.
+NO_FACE = "— subir fotos —"
+
+
+def _face_choices() -> list:
+    """Opciones del desplegable de caras guardadas (con la opción de subir)."""
+    return [NO_FACE] + face_library.list_faces()
+
+
+def _resolve_source_paths(source_files, face_choice) -> List[str]:
+    """Rutas de imágenes fuente: una Cara guardada si se eligió, si no lo subido."""
+    if face_choice and face_choice != NO_FACE:
+        paths = face_library.face_images(face_choice)
+        if paths:
+            return paths
+        raise gr.Error(f"La cara «{face_choice}» no tiene fotos guardadas. Volvé a guardarla.")
+    out = []
+    for f in (source_files or []):
+        p = f if isinstance(f, str) else getattr(f, "name", None)
+        if p:
+            out.append(p)
+    return out
+
+
+def _prepare(pipeline: SwapPipeline, source_files, video_path, face_choice=None) -> str:
+    """Valida entradas, prepara la cara fuente (multi-ref) y devuelve un resumen.
+
+    La fuente puede venir de una **Cara guardada** (Biblioteca de Caras) o de las
+    fotos subidas. ``face_choice`` tiene prioridad si apunta a una cara real.
+    """
+    source_paths = _resolve_source_paths(source_files, face_choice)
+    if not source_paths:
+        raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
     if not video_path:
         raise gr.Error("Sube un vídeo objetivo.")
 
     images = []
-    for f in source_files:
-        path = f if isinstance(f, str) else getattr(f, "name", None)
+    for path in source_paths:
         img = _read_image(path) if path else None
         if img is not None:
             images.append(img)
@@ -187,6 +217,38 @@ def _prepare(pipeline: SwapPipeline, source_files, video_path) -> str:
 # ---------------------------------------------------------------------------
 def _on_refresh_system() -> str:
     return format_system_summary()
+
+
+def _on_save_face(name, files):
+    """Guarda/reemplaza una Cara de la Biblioteca y refresca los desplegables."""
+    paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in (files or [])]
+    try:
+        msg = face_library.save_face(name, paths)
+    except ValueError as exc:
+        return gr.update(), gr.update(), f"⚠️ {exc}", gr.update()
+    faces = face_library.list_faces()
+    return (
+        gr.update(choices=[NO_FACE] + faces, value=(name or "").strip()),  # face_choice: auto-selecciona
+        gr.update(choices=faces, value=None),                              # lib_delete
+        msg,
+        gr.update(value=None),                                             # limpia el uploader de la biblioteca
+    )
+
+
+def _on_delete_face(name):
+    """Borra una Cara guardada y refresca los desplegables."""
+    if not name:
+        return gr.update(), gr.update(), "⚠️ Elegí una cara para borrar."
+    try:
+        msg = face_library.delete_face(name)
+    except ValueError as exc:
+        return gr.update(), gr.update(), f"⚠️ {exc}"
+    faces = face_library.list_faces()
+    return (
+        gr.update(choices=[NO_FACE] + faces, value=NO_FACE),  # face_choice
+        gr.update(choices=faces, value=None),                 # lib_delete
+        msg,
+    )
 
 
 def _apply_expression_mode(mode: str):
@@ -272,12 +334,12 @@ def _memory_panel(engine: str, ram_mode: str, memory_mode: str, force_cpu: bool)
         return ""
 
 
-def _on_preview(source_files, video_path, n_preview, *control_values, progress=gr.Progress()):
+def _on_preview(source_files, face_choice, video_path, n_preview, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
     try:
         progress(0.02, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.4, desc=m))
-        src = _prepare(pipeline, source_files, video_path)
+        src = _prepare(pipeline, source_files, video_path, face_choice)
 
         def cb(frac, msg=""):
             progress(0.4 + frac * 0.6, desc=msg)
@@ -291,18 +353,17 @@ def _on_preview(source_files, video_path, n_preview, *control_values, progress=g
         raise gr.Error(f"Error al previsualizar: {exc}")
 
 
-def _on_compare(source_files, video_path, models, n_cmp, *control_values, progress=gr.Progress()):
+def _on_compare(source_files, face_choice, video_path, models, n_cmp, *control_values, progress=gr.Progress()):
     """A/B: corre varios modelos de swap sobre los mismos frames del material del usuario."""
     settings = _build_settings(*control_values)
-    if not source_files:
-        raise gr.Error("Subí al menos una imagen fuente (la cara a aplicar).")
+    src_paths = _resolve_source_paths(source_files, face_choice)
+    if not src_paths:
+        raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
     if not video_path:
         raise gr.Error("Subí un video objetivo.")
     models = [m for m in (models or [])]
     if len(models) < 2:
         raise gr.Error("Elegí al menos 2 modelos para comparar.")
-    src_paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in source_files]
-    src_paths = [p for p in src_paths if p]
 
     from ..core.compare import compare_models
     try:
@@ -321,12 +382,12 @@ def _on_compare(source_files, video_path, models, n_cmp, *control_values, progre
     return items, msg
 
 
-def _on_process(source_files, video_path, *control_values, progress=gr.Progress()):
+def _on_process(source_files, face_choice, video_path, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
     try:
         progress(0.0, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.15, desc=m))
-        src = _prepare(pipeline, source_files, video_path)
+        src = _prepare(pipeline, source_files, video_path, face_choice)
 
         def cb(frac, msg=""):
             progress(0.15 + frac * 0.85, desc=msg)
@@ -361,7 +422,7 @@ def _max_settings() -> config.Settings:
     return s
 
 
-def _on_maximum_swap(source_files, video_path, progress=gr.Progress()):
+def _on_maximum_swap(source_files, face_choice, video_path, progress=gr.Progress()):
     """🚀 MAXIMUM SWAP: pipeline completo de máxima fidelidad, de un clic.
 
     Etapas: (1) carga de modelos → (2) swap multi-referencia con pixel boost 512
@@ -374,7 +435,7 @@ def _on_maximum_swap(source_files, video_path, progress=gr.Progress()):
     try:
         progress(0.0, desc="🚀 Etapa 1/5 · Cargando modelos (swap + xseg_2 + bisenet + CodeFormer)…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.12, desc=f"🚀 Etapa 1/5 · {m}"))
-        src = _prepare(pipeline, source_files, video_path)
+        src = _prepare(pipeline, source_files, video_path, face_choice)
 
         def cb(frac, msg=""):
             progress(0.12 + frac * 0.88, desc=f"🚀 {msg}")
@@ -431,8 +492,8 @@ def _queue_duration_seconds(video_path: str) -> float:
         return float("inf")
 
 
-def _on_process_queue(source_files, video_queue, *control_values, progress=gr.Progress()):
-    """Procesa una COLA de videos con el MISMO set de imágenes fuente.
+def _on_process_queue(source_files, face_choice, video_queue, *control_values, progress=gr.Progress()):
+    """Procesa una COLA de videos con la MISMA cara fuente (subida o de Biblioteca).
 
     - Los modelos se cargan una sola vez y se reutilizan (pipeline cacheado).
     - La cola se ordena del video MÁS CORTO al MÁS LARGO antes de empezar.
@@ -442,8 +503,9 @@ def _on_process_queue(source_files, video_queue, *control_values, progress=gr.Pr
     Es un *generator*: va emitiendo (resultados, estado) tras cada video.
     """
     settings = _build_settings(*control_values)
-    if not source_files:
-        raise gr.Error("Sube al menos una imagen fuente (la cara a aplicar).")
+    source_paths = _resolve_source_paths(source_files, face_choice)
+    if not source_paths:
+        raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
     videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (video_queue or [])]
     videos = [v for v in videos if v]
     if not videos:
@@ -453,8 +515,7 @@ def _on_process_queue(source_files, video_queue, *control_values, progress=gr.Pr
     pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.06, desc=m))
 
     images = []
-    for f in source_files:
-        path = f if isinstance(f, str) else getattr(f, "name", None)
+    for path in source_paths:
         img = _read_image(path) if path else None
         if img is not None:
             images.append(img)
@@ -730,11 +791,36 @@ def build_interface() -> gr.Blocks:
             with gr.Column(scale=1, min_width=320):
                 with gr.Group():
                     gr.Markdown("#### 🙂 Source Face")
+                    face_choice = gr.Dropdown(
+                        choices=_face_choices(), value=NO_FACE,
+                        label="🗂️ Cara guardada (Biblioteca)",
+                        info="Elegí una cara ya guardada y te salteás subir fotos. "
+                             "Si elegís una, tiene prioridad sobre las imágenes de abajo.",
+                    )
                     source_files = gr.Files(
-                        label="Imagen(es) fuente (la cara a aplicar)",
+                        label="…o subí imagen(es) fuente (la cara a aplicar)",
                         file_count="multiple", file_types=["image"], type="filepath",
                     )
                     gr.Markdown(REFERENCE_TIP, elem_classes="fuser-soft")
+                with gr.Accordion("🗂️ Biblioteca de Caras — crear / borrar", open=False):
+                    gr.Markdown(
+                        "Guardá una persona con **varias fotos** (distintos ángulos y "
+                        "expresiones = más identidad). Después la elegís arriba y solo subís el video. "
+                        "*(No entrena un modelo `.dfm`; guarda la identidad multi-referencia.)*",
+                        elem_classes="fuser-soft",
+                    )
+                    lib_name = gr.Textbox(label="Nombre de la cara", placeholder="Cara 1")
+                    lib_files = gr.Files(
+                        label="Fotos de esta persona (varias)",
+                        file_count="multiple", file_types=["image"], type="filepath",
+                    )
+                    lib_save_btn = gr.Button("💾 Guardar cara", variant="secondary")
+                    with gr.Row():
+                        lib_delete = gr.Dropdown(
+                            choices=face_library.list_faces(), label="Borrar cara guardada", scale=3,
+                        )
+                        lib_delete_btn = gr.Button("🗑️ Borrar", scale=1)
+                    lib_status = gr.Markdown("", elem_classes="fuser-soft")
                 with gr.Group():
                     gr.Markdown("#### 🎬 Target Video")
                     target_video = gr.Video(label="Vídeo objetivo")
@@ -1068,29 +1154,41 @@ def build_interface() -> gr.Blocks:
         for _comp in (ram_mode, memory_mode, force_cpu):
             _comp.change(_memory_panel, inputs=_mem_inputs, outputs=mem_info_md)
 
+        # Biblioteca de Caras: guardar / borrar refrescan ambos desplegables.
+        lib_save_btn.click(
+            _on_save_face,
+            inputs=[lib_name, lib_files],
+            outputs=[face_choice, lib_delete, lib_status, lib_files],
+        )
+        lib_delete_btn.click(
+            _on_delete_face,
+            inputs=lib_delete,
+            outputs=[face_choice, lib_delete, lib_status],
+        )
+
         preview_btn.click(
             _on_preview,
-            inputs=[source_files, target_video, n_preview, *control_inputs],
+            inputs=[source_files, face_choice, target_video, n_preview, *control_inputs],
             outputs=[preview_gallery, status_md],
         )
         cmp_btn.click(
             _on_compare,
-            inputs=[source_files, target_video, cmp_models, cmp_frames, *control_inputs],
+            inputs=[source_files, face_choice, target_video, cmp_models, cmp_frames, *control_inputs],
             outputs=[cmp_gallery, cmp_status],
         )
         process_btn.click(
             _on_process,
-            inputs=[source_files, target_video, *control_inputs],
+            inputs=[source_files, face_choice, target_video, *control_inputs],
             outputs=[output_video, output_file, status_md],
         )
         max_swap_btn.click(
             _on_maximum_swap,
-            inputs=[source_files, target_video],   # nuclear: ignora los controles
+            inputs=[source_files, face_choice, target_video],   # nuclear: ignora los controles
             outputs=[output_video, output_file, status_md, ba_slider],
         )
         queue_btn.click(
             _on_process_queue,
-            inputs=[source_files, video_queue, *control_inputs],
+            inputs=[source_files, face_choice, video_queue, *control_inputs],
             outputs=[queue_results, queue_status],
         )
         split_btn.click(
