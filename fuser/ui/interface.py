@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -134,7 +134,7 @@ def _build_settings(
     preset = config.EXPRESSION_PRESETS.get(expression_mode, {})
     for k in ("ff_detector_angles", "ff_detector_score", "ff_landmarker_score",
               "ff_temporal_fallback", "ff_enhancer_weight", "ff_geometry_mask",
-              "ff_swapper_weight",
+              "ff_swapper_weight", "chain_shape_then_texture",
               "ff_occluder_model", "color_harmonize", "color_harmonize_strength"):
         if k in preset:
             setattr(s, k, preset[k])
@@ -382,9 +382,65 @@ def _on_compare(source_files, face_choice, video_path, models, n_cmp, *control_v
     return items, msg
 
 
+def _release_pipeline() -> None:
+    """Descarga los modelos del pipeline cacheado y limpia el pool de FaceFusion.
+
+    Imprescindible entre pasadas de la cadena: sin el clear del inference-pool de
+    FF (que hace ``engine.unload``), la 2ª pasada reusaría el pool del modelo de la
+    1ª (bug del pool obsoleto). También libera VRAM antes de cargar el 2º modelo.
+    """
+    p = _PIPELINE_CACHE.get("pipeline")
+    if p is not None and getattr(p, "engine", None) is not None:
+        try:
+            p.engine.unload()
+        except Exception:  # pragma: no cover
+            pass
+    _PIPELINE_CACHE["pipeline"] = None
+    _PIPELINE_CACHE["signature"] = None
+
+
+def _swap_video_once(settings, source_files, face_choice, video_path, progress, lo, hi, tag):
+    """Una pasada completa (cargar modelos → preparar fuente → procesar vídeo)."""
+    span = hi - lo
+    pipeline = _get_pipeline(
+        settings, progress=lambda f, m="": progress(lo + span * f * 0.15, desc=f"{tag} · {m}"))
+    src = _prepare(pipeline, source_files, video_path, face_choice)
+    out = pipeline.process_video(
+        video_path, progress=lambda f, m="": progress(lo + span * (0.15 + 0.85 * f), desc=f"{tag} · {m}"))
+    return out, src
+
+
+def _process_chain(base, source_files, face_choice, video_path, progress):
+    """Cadena forma→textura (Máxima Identidad PRO): hififace y luego inswapper.
+
+    Pasada 1 (hififace + máscara BOX, SIN enhancer/temporal/QC) impone la forma de
+    nariz/cráneo de la foto. Pasada 2 (inswapper + enhancer + temporal/QC) reinyecta
+    textura/nitidez tratando la salida de la pasada 1 como objetivo → preserva la
+    forma nueva. Se libera el modelo entre pasadas (VRAM + pool de FF).
+    """
+    pass1 = replace(
+        base, ff_swapper_model="hififace_unofficial_256", ff_pixel_boost="512x512",
+        ff_geometry_mask=True, enhancer_model="none", enhancer_blend=0.0,
+        two_pass_temporal=False, qc_second_pass=False, temporal_smoothing=False,
+        chain_shape_then_texture=False,
+    )
+    out1, _ = _swap_video_once(pass1, source_files, face_choice, video_path, progress,
+                               0.0, 0.5, "🎯➕ Pasada 1/2 · forma (hififace)")
+    _release_pipeline()  # limpia pool de FF + VRAM antes del 2º modelo
+    pass2 = replace(base, ff_swapper_model="inswapper_128", chain_shape_then_texture=False)
+    out2, src = _swap_video_once(pass2, source_files, face_choice, out1, progress,
+                                 0.5, 1.0, "🎯➕ Pasada 2/2 · textura (inswapper)")
+    return out2, src
+
+
 def _on_process(source_files, face_choice, video_path, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
     try:
+        if getattr(settings, "chain_shape_then_texture", False):
+            progress(0.0, desc="🎯➕ Cadena forma+textura (2 pasadas)…")
+            out_path, src = _process_chain(settings, source_files, face_choice, video_path, progress)
+            return out_path, out_path, f"✅ ¡Vídeo procesado! (cadena forma+textura) {src}  ·  Descárgalo abajo."
+
         progress(0.0, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.15, desc=m))
         src = _prepare(pipeline, source_files, video_path, face_choice)

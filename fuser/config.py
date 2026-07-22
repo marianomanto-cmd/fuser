@@ -300,8 +300,10 @@ EXPR_MUSIC_VIDEO = "music_video"
 EXPR_HIGH_EXPRESSION = "high_expression"
 EXPR_MAX = "max"
 EXPR_MAXIDENTITY = "max_identity"
+EXPR_MAXID_CHAIN = "max_identity_chain"
 
 EXPRESSION_MODE_LABELS: Dict[str, str] = {
+    "🎯➕ Máxima Identidad PRO (2 pasadas: forma hififace + textura inswapper · 2× lento)": EXPR_MAXID_CHAIN,
     "🎯 Máxima Identidad (hififace: transfiere nariz/cráneo de la FOTO)": EXPR_MAXIDENTITY,
     "🔥 MÁXIMO (inswapper 512 + máscaras finas + todo al máximo)": EXPR_MAX,
     "🎤 Videos musicales (caras cantando)": EXPR_MUSIC_VIDEO,
@@ -315,6 +317,29 @@ EXPRESSION_MODE_LABELS: Dict[str, str] = {
 # Nota: "facefusion"/"insightface" son los valores de ENGINE_* (definidos más
 # abajo); se usan como literales aquí porque este dict se evalúa antes.
 EXPRESSION_PRESETS: Dict[str, dict] = {
+    # 🎯➕ MÁXIMA IDENTIDAD PRO: la cadena de 2 modelos (lever #4 del research, la de
+    # mayor techo one-shot). Pasada 1 = hififace impone la FORMA (nariz/cráneo de la
+    # foto); pasada 2 = inswapper reinyecta TEXTURA/nitidez de identidad tratando esa
+    # salida como objetivo (así preserva la forma nueva). Medido en stock: 0.712
+    # (inswapper solo) → 0.738 (cadena). Este preset define la PASADA 2 (textura); la
+    # UI (_on_process) deriva la pasada 1 (hififace) y las encadena. Cuesta ~2× tiempo.
+    EXPR_MAXID_CHAIN: dict(
+        engine="facefusion",
+        ff_swapper_model="inswapper_128", ff_pixel_boost="512x512",  # pasada 2 = textura
+        chain_shape_then_texture=True,
+        ff_swapper_weight=0.9,        # empuje anti-objetivo en AMBAS pasadas
+        enhancer_model="codeformer", enhancer_blend=0.7, codeformer_fidelity=0.5,
+        ff_enhancer_weight=0.5,
+        ff_detector_angles=(0, 90, 180, 270),
+        ff_detector_score=0.3, ff_landmarker_score=0.2, ff_temporal_fallback=True,
+        ff_occluder_model="xseg_2",
+        color_harmonize=True, color_harmonize_strength=0.8,
+        reference_distance=0.9, mask_mode=MASK_HULL,
+        eye_preservation=0.0, mouth_detail=0.4, skin_detail=0.0,
+        color_match=True, temporal_smoothing=True, temporal_alpha=0.4,
+        motion_adaptive=True, two_pass_temporal=True, qc_second_pass=True,
+        reference_count=0, ram_mode=RAM_MAX, memory_mode=MODE_MAX_QUALITY,
+    ),
     # 🎯 MÁXIMA IDENTIDAD: para cuando el swap "sigue pareciéndose a la cara del
     # video". El objetivo aquí NO es el máximo parecido de textura (eso lo gana
     # inswapper) sino RESPETAR LA GEOMETRÍA de la FOTO: forma de nariz, mandíbula
@@ -588,6 +613,12 @@ class Settings:
     # 1.35·foto − 0.35·video (resta la identidad del video). Ver engine
     # _register_swapper_weight. Anti "sigue pareciéndose al video".
     ff_swapper_weight: float = 0.5
+    # Cadena de 2 modelos (modo Máxima Identidad PRO): pasada 1 = hififace impone la
+    # FORMA (nariz/cráneo de la foto); pasada 2 = inswapper reinyecta TEXTURA/nitidez
+    # tratando esa salida como objetivo (preserva la forma nueva). Medido: id 0.712
+    # (inswapper solo) → 0.738 (cadena). Cuesta ~2× (dos pasadas de video). Lo
+    # orquesta la UI (_on_process); requiere unload que limpie el pool de FF.
+    chain_shape_then_texture: bool = False
     ff_temporal_fallback: bool = True        # rellena huecos de detección reusando los últimos kps (anti-salto)
     ff_occluder_model: str = "xseg_1"        # oclusor (pelo/manos/micro): xseg_2 = más fino (modo MÁXIMO)
     # PRIORIDAD GEOMETRÍA (modo 🎯 Máxima Identidad): con modelos que transfieren

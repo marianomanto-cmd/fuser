@@ -779,6 +779,17 @@ class FaceFusionSwapper(BaseFaceSwapper):
         return self._postprocess(out, targets, original=frame)
 
     def unload(self) -> None:
+        # Limpia los inference-pools que FaceFusion cachea a NIVEL DE MÓDULO
+        # (persisten entre instancias del engine). Sin esto, cambiar de modelo de
+        # swap en el mismo proceso reusa el pool viejo (bug del pool obsoleto:
+        # 'embedding_converter None'). Clave para la cadena forma→textura.
+        for key in ("swapper", "enhancer"):
+            mod = self._modules.get(key)
+            if mod is not None and hasattr(mod, "clear_inference_pool"):
+                try:
+                    mod.clear_inference_pool()
+                except Exception:  # pragma: no cover
+                    pass
         self._modules = {}
         self._source_face = None
         if self._analyser is not None and hasattr(self._analyser, "unload"):
