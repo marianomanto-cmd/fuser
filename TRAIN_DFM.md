@@ -13,6 +13,12 @@ en un **entorno separado**. Regla de oro: **entrenás con CUDA una vez, usás co
 > el `onnxruntime-directml` y la inferencia de Fuser dejaría de andar. El entrenamiento va en
 > su **propia** carpeta/venv o en la **nube**.
 
+> 🚀 **Guía paso a paso de la NUBE (recomendada), con comandos reales:** **[CLOUD_TRAIN.md](CLOUD_TRAIN.md)**
+> — alquilar la GPU en RunPod/Vast, instalar DeepFaceLab-Linux, entrenar y exportar el `.dfm`.
+>
+> 🧹 **Curar tus fotos antes de entrenar:** `python scripts/prep_faceset.py --input <carpeta_fotos>`
+> deja solo las buenas y te dice qué ángulos te faltan.
+
 ---
 
 ## 0) Validá el pipeline ANTES de invertir horas (recomendado)
