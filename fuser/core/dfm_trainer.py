@@ -131,14 +131,24 @@ def _write_state(slug: str, **kw) -> None:
 # ---------------------------------------------------------------------------
 # Estado global del entrenador
 # ---------------------------------------------------------------------------
+def rtm_ready() -> bool:
+    """¿El faceset genérico (DST universal + donantes de síntesis) está listo?"""
+    d = dfl_root() / "assets" / "rtm_faceset"
+    if not d.is_dir():
+        return False
+    return any(d.rglob("faceset.pak")) or next(d.rglob("*.jpg"), None) is not None
+
+
 def status() -> dict:
     p = _paths()
     py = _find_python(p)
-    rtt_ok = any(p["rtt"].glob("*_SAEHD_*.npy")) or any(p["rtt"].glob("*.npy")) if p["rtt"].is_dir() else False
+    # rglob: el zip del RTT extrae en subcarpeta ("RTT model 224 V2/…")
+    rtt_ok = next(p["rtt"].rglob("*.npy"), None) is not None if p["rtt"].is_dir() else False
     return {
         "root": str(p["root"]),
         "build_ready": bool(py and p["main"].parent.is_dir() and _find_main(p)),
         "rtt_ready": rtt_ok,
+        "rtm_ready": rtm_ready(),
         "python": str(py) if py else None,
     }
 
@@ -156,29 +166,69 @@ def _find_main(p: dict) -> Optional[Path]:
 # ---------------------------------------------------------------------------
 # Descarga con reanudación
 # ---------------------------------------------------------------------------
-def _download(url: str, dst: Path, progress: Optional[Callable] = None, label: str = "") -> Path:
-    """Descarga en streaming con reanudación (.part + Range)."""
+def _download(url: str, dst: Path, progress: Optional[Callable] = None, label: str = "",
+              retry_wait: int = 15, max_stalls: int = 2000) -> Path:
+    """Descarga en streaming REANUDABLE y tolerante a cortes de internet.
+
+    - Estado en ``<dst>.part``: si el proceso o la conexión mueren, la próxima
+      llamada (o el reintento automático) continúa con HTTP Range desde donde
+      quedó — nunca se re-descarga lo ya bajado.
+    - Ante un corte reintenta solo (espera ``retry_wait`` s), sin abortar el
+      paso. ``max_stalls`` = tope de reintentos SIN progreso (guardia anti-bucle;
+      con progreso el contador se resetea).
+    """
+    import urllib.error
     import urllib.request
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     part = dst.with_suffix(dst.suffix + ".part")
-    have = part.stat().st_size if part.exists() else 0
-    req = urllib.request.Request(url, headers={"User-Agent": "fuser-dfm-trainer"})
-    if have:
-        req.add_header("Range", f"bytes={have}-")
-    mode = "ab" if have else "wb"
-    with urllib.request.urlopen(req, timeout=60) as r:
-        total = have + int(r.headers.get("Content-Length") or 0)
-        done = have
-        with open(part, mode) as fh:
-            while True:
-                chunk = r.read(1024 * 512)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                done += len(chunk)
-                if progress and total:
-                    progress(done / total, f"{label} {done // 1048576}/{total // 1048576} MB")
+    total_known = 0
+    stalls = 0
+    while True:
+        have = part.stat().st_size if part.exists() else 0
+        req = urllib.request.Request(url, headers={"User-Agent": "fuser-dfm-trainer"})
+        if have:
+            req.add_header("Range", f"bytes={have}-")
+        got_bytes = False
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                cl = int(r.headers.get("Content-Length") or 0)
+                total_known = have + cl if cl else total_known
+                done = have
+                with open(part, "ab" if have else "wb") as fh:
+                    while True:
+                        chunk = r.read(1024 * 512)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        done += len(chunk)
+                        got_bytes = True
+                        if progress and total_known:
+                            progress(done / total_known,
+                                     f"{label} {done // 1048576}/{total_known // 1048576} MB")
+            # stream terminó limpio: ¿está completa?
+            size = part.stat().st_size if part.exists() else 0
+            if not total_known or size >= total_known:
+                break
+            # quedó corta (corte silencioso): reanudar
+            log.warning("%s: stream cortado en %d/%d MB; reanudando…",
+                        dst.name, size // 1048576, total_known // 1048576)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416:  # Range fuera de rango = ya estaba completa
+                break
+            log.warning("%s: HTTP %s; reintento en %ds…", dst.name, exc.code, retry_wait)
+        except Exception as exc:  # red caída, timeout, DNS…
+            log.warning("%s: conexión interrumpida (%s); reintento en %ds…",
+                        dst.name, str(exc)[:80], retry_wait)
+            if progress:
+                progress(min(0.99, (part.stat().st_size if part.exists() else 0) /
+                             max(1, total_known or 1)),
+                         f"{label} conexión caída — reintentando solo…")
+        stalls = 0 if got_bytes else stalls + 1
+        if stalls >= max_stalls:
+            raise RuntimeError(f"{dst.name}: {max_stalls} reintentos sin progreso; "
+                               f"revisá la conexión y volvé a intentar (lo bajado se conserva).")
+        time.sleep(retry_wait)
     part.rename(dst)
     return dst
 
@@ -534,6 +584,11 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
 # ---------------------------------------------------------------------------
 # Entrenamiento
 # ---------------------------------------------------------------------------
+# Objetivo de iteraciones al que el AUTOPILOTO corta, exporta y registra el .dfm.
+# Con warm-start del RTT, ~400k es un buen equilibrio calidad/tiempo en 8GB DX12.
+AUTO_TARGET_ITERS = int(os.environ.get("FUSER_DFM_TARGET_ITERS", "400000"))
+
+
 def start(name: str) -> str:
     from ..core.face_library import _slug
     slug = _slug(name)
@@ -552,7 +607,8 @@ def start(name: str) -> str:
         "--silent-start", "--no-preview",
     ], logf, detach=True)
     (ws.parent / "train.pid").write_text(str(proc.pid), encoding="utf-8")
-    _write_state(slug, phase="training", started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    _write_state(slug, phase="training", name=name, target_iters=AUTO_TARGET_ITERS,
+                 started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
     return f"🏋️ Entrenamiento lanzado (pid {proc.pid}). Corre en segundo plano aunque cierres Fuser."
 
 
@@ -624,3 +680,61 @@ def export(name: str, timeout: int = 1800) -> Path:
     if not dfms:
         raise RuntimeError(f"El export no generó un .dfm (rc={rc}). Log: {logf}")
     return dfms[0]
+
+
+# ---------------------------------------------------------------------------
+# Autopiloto: exporta y registra SOLO al llegar al objetivo de iteraciones
+# ---------------------------------------------------------------------------
+_AUTOPILOT = {"started": False}
+
+
+def autopilot_scan() -> List[str]:
+    """Revisa los entrenamientos: si alguno llegó a su objetivo, lo corta,
+    exporta el .dfm y lo registra en la Biblioteca de Caras. Devuelve acciones."""
+    acts: List[str] = []
+    wsr = _paths()["workspaces"]
+    if not wsr.is_dir():
+        return acts
+    for d in wsr.iterdir():
+        try:
+            st = json.loads((d / "state.json").read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if st.get("phase") != "training":
+            continue
+        slug = d.name
+        name = st.get("name", slug)
+        info = progress_info(slug)
+        target = int(st.get("target_iters", AUTO_TARGET_ITERS))
+        if info["running"] and info["iter"] and info["iter"] >= target:
+            try:
+                stop(slug)
+                dfm = export(slug)
+                from .face_library import set_dfm
+                msg = set_dfm(name, str(dfm))
+                _write_state(slug, phase="done", exported=str(dfm))
+                log.info("Autopiloto: %s → %s", name, msg)
+                acts.append(f"{name}: {msg}")
+            except Exception as exc:  # reintenta en el próximo tick
+                log.warning("Autopiloto falló en %s: %s", name, exc)
+                _write_state(slug, phase="training")
+    return acts
+
+
+def start_autopilot(interval: int = 600) -> None:
+    """Hilo daemon: cada ``interval`` s corre autopilot_scan. Idempotente."""
+    if _AUTOPILOT["started"]:
+        return
+    _AUTOPILOT["started"] = True
+    import threading
+
+    def _loop():
+        while True:
+            try:
+                autopilot_scan()
+            except Exception:  # pragma: no cover
+                pass
+            time.sleep(interval)
+
+    threading.Thread(target=_loop, daemon=True, name="dfm-autopilot").start()
+    log.info("Autopiloto de entrenamiento .dfm activo (objetivo %s iters).", f"{AUTO_TARGET_ITERS:,}")

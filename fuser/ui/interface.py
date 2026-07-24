@@ -178,14 +178,39 @@ def _resolve_source_paths(source_files, face_choice) -> List[str]:
     return out
 
 
-def _apply_dfm(settings: config.Settings, face_choice) -> Optional[str]:
-    """Si la Cara elegida tiene un .dfm entrenado, activa el Deep Swapper con él.
+# Valor "sin modelo entrenado" del desplegable de Deep Swap en Face Swap.
+NO_DFM = "— sin modelo (one-shot con fotos) —"
 
-    Debe llamarse ANTES de _get_pipeline (el model_signature incluye el .dfm, así
-    que activa la recarga del pipeline con el modelo correcto). Devuelve el
-    model_id del .dfm o None (one-shot normal).
+
+def _dfm_choices() -> list:
+    """Modelos .dfm disponibles para el desplegable de Face Swap."""
+    out = [NO_DFM]
+    seen = set()
+    for n in face_library.list_faces():
+        mid = face_library.dfm_of(n)
+        if mid:
+            out.append((f"🧬 {n}", mid))
+            seen.add(mid)
+    try:
+        for f in sorted(face_library.FF_CUSTOM_DFM_DIR.glob("*.dfm")):
+            mid = f"custom/{f.stem}"
+            if mid not in seen:
+                out.append((f"🧬 {f.stem}", mid))
+    except Exception:
+        pass
+    return out
+
+
+def _apply_dfm(settings: config.Settings, face_choice, dfm_choice=None) -> Optional[str]:
+    """Activa el Deep Swapper si hay un modelo .dfm elegido (o la Cara tiene uno).
+
+    Prioridad: el desplegable «🧬 Modelo DFM» de Face Swap; si está en «sin
+    modelo», la Cara elegida (si tiene .dfm asociado). Debe llamarse ANTES de
+    _get_pipeline (el model_signature incluye el .dfm → recarga el pipeline).
     """
-    dfm = face_library.dfm_of(face_choice) if (face_choice and face_choice != NO_FACE) else None
+    dfm = dfm_choice if (dfm_choice and dfm_choice != NO_DFM) else None
+    if not dfm:
+        dfm = face_library.dfm_of(face_choice) if (face_choice and face_choice != NO_FACE) else None
     settings.ff_deep_swapper_model = dfm or ""
     return dfm
 
@@ -252,130 +277,100 @@ def _dfm_library_status() -> str:
 
 
 def _on_import_dfm(cara, dfm_file):
-    """Asocia un .dfm entrenado a una Cara existente."""
+    """Asocia un .dfm entrenado a una Cara existente. Refresca el selector DFM."""
     path = dfm_file if isinstance(dfm_file, str) else getattr(dfm_file, "name", None)
     try:
         msg = face_library.set_dfm(cara, path)
     except ValueError as exc:
-        return f"⚠️ {exc}", gr.update()
-    return f"{msg}\n\n{_dfm_library_status()}", gr.update(value=None)
+        return f"⚠️ {exc}", gr.update(), gr.update()
+    return (f"{msg}\n\n{_dfm_library_status()}", gr.update(value=None),
+            gr.update(choices=_dfm_choices()))
 
 
-def _on_create_model(name, files, progress=gr.Progress()):
-    """Pestaña 🧬 Crear modelo: cura las fotos, crea la Cara y arma el paquete
-    de entrenamiento (.zip) para llevar a la nube/DeepFaceLab.
+def _on_trainer_resume(cara):
+    """▶️ Retomar un entrenamiento pausado (sigue del último autoguardado)."""
+    from ..core import dfm_trainer
+    if not cara:
+        return "⚠️ Elegí el modelo."
+    try:
+        return dfm_trainer.start(cara)
+    except Exception as exc:
+        return f"⚠️ {exc}"
 
-    Salidas: [cm_report, cm_bundle, cm_next, face_choice, lib_delete, dfm_cara, cm_dfm_cara].
-    """
+
+def _curate_and_create_face(name, files, progress, frac0=0.0, frac1=0.3):
+    """Cura las fotos, crea la Cara y devuelve (reporte_md, carpeta_curada)."""
     from ..core import faceset
-    name = (name or "").strip()
-    nofill = (gr.update(),) * 3
-    if not name:
-        return ("⚠️ Poné un nombre para el modelo/persona.", None, "", *nofill)
     paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in (files or [])]
     paths = [p for p in paths if p]
     if len(paths) < 10:
-        return ("⚠️ Subí bastantes fotos (idealmente 500-2000; mínimo ~10 para probar el flujo).",
-                None, "", *nofill)
-
+        raise gr.Error("Cargá al menos ~10 fotos de la persona (cuantas más y más variadas, mejor).")
     out_dir = config.OUTPUTS_DIR / ("faceset_" + face_library._slug(name))
     import shutil as _sh
     _sh.rmtree(out_dir, ignore_errors=True)
-    progress(0.05, desc="Curando fotos…")
     rep = faceset.curate(paths, out_dir=out_dir,
-                         progress=lambda f, m="": progress(0.05 + f * 0.8, desc=m))
+                         progress=lambda f, m="": progress(frac0 + f * (frac1 - frac0), desc=m))
     if rep["kept"] == 0:
-        return ("No quedó ninguna foto útil:\n\n" + faceset.format_report_md(rep), None, "", *nofill)
-
-    progress(0.9, desc="Creando la Cara…")
-    try:
-        face_library.save_face(name, rep["kept_paths"][:face_library.MAX_IMAGES])
-    except ValueError as exc:
-        return (f"⚠️ {exc}", None, "", *nofill)
-
-    progress(0.95, desc="Armando el paquete de entrenamiento…")
-    bundle = faceset.make_bundle(out_dir, name)
-
-    report_md = ("### ✅ Curado\n\n" + faceset.format_report_md(rep)
-                 + f"\n\n**Cara «{name}» creada** (con las mejores fotos, para el swap one-shot y para "
-                   "colgarle el `.dfm` después).")
-    next_md = (
-        f"### ▶️ Siguiente\n\n"
-        f"Seguí con el **paso ②** (instalar el entrenador local, una sola vez) y el **paso ③** "
-        f"(preparar el entrenamiento de «{name}»). Todo desde la app.\n\n"
-        f"*(El paquete de abajo es opcional: solo si algún día preferís entrenar en la nube — "
-        f"ver `CLOUD_TRAIN.md`.)*"
-    )
-    faces = face_library.list_faces()
-    return (report_md, str(bundle), next_md,
-            gr.update(choices=[NO_FACE] + faces),           # face_choice
-            gr.update(choices=faces),                       # lib_delete
-            gr.update(choices=faces, value=name))           # cm_model_cara (pestaña 🧬)
+        raise gr.Error("Ninguna foto útil:\n" + faceset.format_report_md(rep))
+    face_library.save_face(name, rep["kept_paths"][:face_library.MAX_IMAGES])
+    return faceset.format_report_md(rep), out_dir
 
 
-# --- Entrenador local de .dfm (pestaña 🧬, pasos ②-⑤) ---------------------------
 def _trainer_status_md() -> str:
     from ..core import dfm_trainer
     try:
         st = dfm_trainer.status()
     except Exception as exc:
         return f"⚠️ {exc}"
-    build = "✅ instalado" if st["build_ready"] else "❌ falta"
-    rtt = "✅ listo" if st["rtt_ready"] else "❌ falta"
-    return (f"**Entrenador local** (en `{st['root']}`): build DeepFaceLab DX12 {build} · "
-            f"preentrenado RTT 224 {rtt}.")
+    def _mark(ok):
+        return "✅" if ok else "⏳ falta (se baja solo al crear)"
+    ready = st["build_ready"] and st["rtt_ready"] and st.get("rtm_ready")
+    head = "**✅ Entrenador local LISTO**" if ready else "**Entrenador local** (se instala solo)"
+    return (f"{head} (`{st['root']}`): build DeepFaceLab {_mark(st['build_ready'])} · "
+            f"preentrenado RTT {_mark(st['rtt_ready'])} · set genérico {_mark(st.get('rtm_ready'))}.")
 
 
-def _on_trainer_install(progress=gr.Progress()):
-    from ..core import dfm_trainer
-    try:
-        progress(0.01, desc="Instalando el entrenador local (descarga grande, una sola vez)…")
-        msg = dfm_trainer.install(progress=lambda f, m="": progress(min(f, 0.99), desc=m))
-    except Exception as exc:
-        log.exception("Instalación del entrenador falló")
-        return f"⚠️ {exc}\n\n{_trainer_status_md()}"
-    return f"{msg}\n\n{_trainer_status_md()}"
+def _on_create_dfm(name, files, dst_videos, progress=gr.Progress()):
+    """🧬 CREAR MODELO DFM — un botón, todo automático.
 
-
-def _on_trainer_prepare(cara, dst_videos, progress=gr.Progress()):
-    """Genera desde las imágenes TODO el material que DeepFaceLab necesita.
-
-    Videos destino OPCIONALES: sin videos usa el faceset genérico (descarga
-    única ~8.8 GB) y el modelo sale "universal".
+    Instala lo que falte → cura las fotos → crea la Cara → sintetiza el faceset
+    (si hay pocas fotos) → prepara el workspace → ENTRENA en segundo plano. El
+    autopiloto exporta y registra el modelo al llegar al objetivo de iteraciones.
     """
     from ..core import dfm_trainer
-    if not cara:
-        return "⚠️ Elegí la Cara (creala primero en el paso ①)."
+    name = (name or "").strip()
+    if not name:
+        raise gr.Error("Poné un nombre para el modelo (p.ej. 'Cara 1').")
+    st = dfm_trainer.status()
+    if not (st["build_ready"] and st["rtt_ready"]):
+        progress(0.0, desc="Instalando el entrenador local (descarga única, puede tardar)…")
+        dfm_trainer.install(progress=lambda f, m="": progress(f * 0.15, desc=m))
+    report_md, curated = _curate_and_create_face(name, files, progress, 0.15, 0.30)
     videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (dst_videos or [])]
     videos = [v for v in videos if v]
-    src = config.OUTPUTS_DIR / ("faceset_" + face_library._slug(cara))
-    if not src.is_dir():
-        # sin curado previo: usa las fotos guardadas de la Cara
-        src = face_library.face_dir(cara)
-    try:
-        return dfm_trainer.prepare(cara, src, videos,
-                                   progress=lambda f, m="": progress(f, desc=m))
-    except Exception as exc:
-        log.exception("Preparación del entrenamiento falló")
-        return f"⚠️ {exc}"
-
-
-def _on_trainer_start(cara):
-    from ..core import dfm_trainer
-    if not cara:
-        return "⚠️ Elegí la Cara."
-    try:
-        return (dfm_trainer.start(cara)
-                + "\n\n⚠️ Mientras entrena, la GPU está ocupada: no proceses videos a la vez. "
-                  "Un modelo decente lleva **días** de entrenamiento continuo (podés parar y retomar).")
-    except Exception as exc:
-        return f"⚠️ {exc}"
+    msg_prep = dfm_trainer.prepare(name, curated, videos,
+                                   progress=lambda f, m="": progress(0.30 + f * 0.62, desc=m))
+    progress(0.94, desc="Lanzando el entrenamiento…")
+    msg_train = dfm_trainer.start(name)
+    faces = face_library.list_faces()
+    status_md = (
+        f"### ✅ Modelo «{name}» en marcha\n\n{report_md}\n\n{msg_prep}\n\n{msg_train}\n\n"
+        f"🤖 **Autopiloto activo**: al llegar a ~{dfm_trainer.AUTO_TARGET_ITERS:,} iteraciones "
+        f"(días de GPU) corta, exporta y **registra el modelo solo**. Podés cerrar Fuser (el "
+        f"entrenamiento sigue); al reabrirla el autopiloto retoma el control. Seguí el avance con "
+        f"**🔄 Estado**, o usá **⏹️ Terminar y exportar YA** si el parecido ya te convence.\n\n"
+        f"⚠️ Mientras entrena, evitá procesar videos (comparten GPU)."
+    )
+    return (status_md,
+            gr.update(choices=[NO_FACE] + faces),
+            gr.update(choices=faces),
+            gr.update(choices=faces, value=name))
 
 
 def _on_trainer_stop(cara):
     from ..core import dfm_trainer
     if not cara:
-        return "⚠️ Elegí la Cara."
+        return "⚠️ Elegí el modelo."
     try:
         return dfm_trainer.stop(cara)
     except Exception as exc:
@@ -385,33 +380,36 @@ def _on_trainer_stop(cara):
 def _on_trainer_refresh(cara):
     from ..core import dfm_trainer
     if not cara:
-        return "⚠️ Elegí la Cara."
+        return "⚠️ Elegí el modelo."
     info = dfm_trainer.progress_info(cara)
     run = "🏃 ENTRENANDO" if info["running"] else "⏸️ detenido"
-    lines = [f"**Estado:** {run} · fase: {info['phase']}"]
+    lines = [_trainer_status_md(), f"**Estado:** {run} · fase: {info['phase']}"]
     if info["iter"] is not None:
-        lines.append(f"**Iteración:** {info['iter']:,} · {info['ms']} ms/iter · "
-                     f"pérdida src {info['loss_src']} / dst {info['loss_dst']}")
-        lines.append("*Guía: >100k iters = parecido inicial · 300-600k = bueno · 1M+ = excelente.*")
+        lines.append(f"**Iteración:** {info['iter']:,} / ~{dfm_trainer.AUTO_TARGET_ITERS:,} · "
+                     f"{info['ms']} ms/iter · pérdida src {info['loss_src']} / dst {info['loss_dst']}")
+        lines.append("*Guía: >100k = parecido inicial · 300-600k = bueno · el autopiloto corta solo.*")
     if info["tail"]:
         lines.append("```\n" + info["tail"][-900:] + "\n```")
     return "\n\n".join(lines)
 
 
-def _on_trainer_export(cara, progress=gr.Progress()):
+def _on_finish_export(cara, progress=gr.Progress()):
+    """⏹️ Terminar YA: para el entrenamiento, exporta el .dfm y lo registra."""
     from ..core import dfm_trainer
     if not cara:
-        return "⚠️ Elegí la Cara.", gr.update()
+        return "⚠️ Elegí el modelo.", gr.update()
     try:
-        progress(0.1, desc="Exportando el modelo a .dfm (unos minutos)…")
+        progress(0.05, desc="Deteniendo el entrenamiento…")
+        dfm_trainer.stop(cara)
+        progress(0.2, desc="Exportando el modelo a .dfm (unos minutos, corre en CPU)…")
         dfm_path = dfm_trainer.export(cara)
-        progress(0.8, desc="Asociando el .dfm a la Cara…")
+        progress(0.85, desc="Registrando el modelo…")
         msg = face_library.set_dfm(cara, str(dfm_path))
     except Exception as exc:
-        log.exception("Export del .dfm falló")
+        log.exception("Terminar/exportar falló")
         return f"⚠️ {exc}", gr.update()
-    return (f"{msg}\n\n🎉 Listo: **reiniciá Fuser** y elegí «{cara}» como Cara para montar con el "
-            f"modelo entrenado (geometría completa).\n\n{_dfm_library_status()}"), gr.update(value=str(dfm_path))
+    return (f"{msg}\n\n🎉 **Reiniciá Fuser** y elegilo en Face Swap → «🧬 Modelo DFM».",
+            gr.update(choices=_dfm_choices()))
 
 
 def _on_save_face(name, files):
@@ -541,9 +539,9 @@ def _memory_panel(engine: str, ram_mode: str, memory_mode: str, force_cpu: bool)
         return ""
 
 
-def _on_preview(source_files, face_choice, video_path, n_preview, *control_values, progress=gr.Progress()):
+def _on_preview(source_files, face_choice, dfm_choice, video_path, n_preview, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
-    _apply_dfm(settings, face_choice)
+    _apply_dfm(settings, face_choice, dfm_choice)
     try:
         progress(0.02, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.4, desc=m))
@@ -641,11 +639,12 @@ def _process_chain(base, source_files, face_choice, video_path, progress):
     return out2, src
 
 
-def _on_process(source_files, face_choice, video_path, *control_values, progress=gr.Progress()):
+def _on_process(source_files, face_choice, dfm_choice, video_path, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
-    _apply_dfm(settings, face_choice)
+    _apply_dfm(settings, face_choice, dfm_choice)
     try:
-        if getattr(settings, "chain_shape_then_texture", False):
+        # con Deep Swapper activo NO hay cadena (el .dfm ya es forma+textura)
+        if getattr(settings, "chain_shape_then_texture", False) and not settings.ff_deep_swapper_model:
             progress(0.0, desc="🎯➕ Cadena forma+textura (2 pasadas)…")
             out_path, src = _process_chain(settings, source_files, face_choice, video_path, progress)
             return out_path, out_path, f"✅ ¡Vídeo procesado! (cadena forma+textura) {src}  ·  Descárgalo abajo."
@@ -687,7 +686,7 @@ def _max_settings() -> config.Settings:
     return s
 
 
-def _on_maximum_swap(source_files, face_choice, video_path, progress=gr.Progress()):
+def _on_maximum_swap(source_files, face_choice, dfm_choice, video_path, progress=gr.Progress()):
     """🚀 MAXIMUM SWAP: pipeline completo de máxima fidelidad, de un clic.
 
     Etapas: (1) carga de modelos → (2) swap multi-referencia con pixel boost 512
@@ -697,7 +696,7 @@ def _on_maximum_swap(source_files, face_choice, video_path, progress=gr.Progress
     central y registra los ajustes exactos (reproducibilidad).
     """
     settings = _max_settings()
-    _apply_dfm(settings, face_choice)
+    _apply_dfm(settings, face_choice, dfm_choice)
     try:
         progress(0.0, desc="🚀 Etapa 1/5 · Cargando modelos (swap + xseg_2 + bisenet + CodeFormer)…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.12, desc=f"🚀 Etapa 1/5 · {m}"))
@@ -758,7 +757,7 @@ def _queue_duration_seconds(video_path: str) -> float:
         return float("inf")
 
 
-def _on_process_queue(source_files, face_choice, video_queue, *control_values, progress=gr.Progress()):
+def _on_process_queue(source_files, face_choice, dfm_choice, video_queue, *control_values, progress=gr.Progress()):
     """Procesa una COLA de videos con la MISMA cara fuente (subida o de Biblioteca).
 
     - Los modelos se cargan una sola vez y se reutilizan (pipeline cacheado).
@@ -769,9 +768,9 @@ def _on_process_queue(source_files, face_choice, video_queue, *control_values, p
     Es un *generator*: va emitiendo (resultados, estado) tras cada video.
     """
     settings = _build_settings(*control_values)
-    _apply_dfm(settings, face_choice)
+    deep = _apply_dfm(settings, face_choice, dfm_choice)
     source_paths = _resolve_source_paths(source_files, face_choice)
-    if not source_paths:
+    if not source_paths and not deep:
         raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
     videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (video_queue or [])]
     videos = [v for v in videos if v]
@@ -786,12 +785,14 @@ def _on_process_queue(source_files, face_choice, video_queue, *control_values, p
         img = _read_image(path) if path else None
         if img is not None:
             images.append(img)
-    if not images:
+    if not images and not deep:
         raise gr.Error("No se pudieron leer las imágenes fuente.")
-    try:
-        stats = pipeline.prepare_source(images)
-    except ValueError as exc:
-        raise gr.Error(str(exc))
+    if images:
+        try:
+            stats = pipeline.prepare_source(images)
+        except ValueError as exc:
+            if not deep:
+                raise gr.Error(str(exc))
 
     # Ordenar la cola del MÁS CORTO al MÁS LARGO: las victorias rápidas salen primero.
     videos = sorted(videos, key=_queue_duration_seconds)
@@ -1061,6 +1062,12 @@ def build_interface() -> gr.Blocks:
                     with gr.Column(scale=1, min_width=320):
                         with gr.Group():
                             gr.Markdown("#### 🙂 Source Face")
+                            dfm_choice = gr.Dropdown(
+                                choices=_dfm_choices(), value=NO_DFM,
+                                label="🧬 Modelo DFM (Deep Swap)",
+                                info="Modelo ENTRENADO de una persona (pestaña 🧬 Deep Swap). Si elegís "
+                                     "uno, monta con geometría completa e IGNORA fotos/Cara.",
+                            )
                             face_choice = gr.Dropdown(
                                 choices=_face_choices(), value=NO_FACE,
                                 label="🗂️ Cara guardada (Biblioteca)",
@@ -1393,56 +1400,49 @@ def build_interface() -> gr.Blocks:
                                     label="⬇️ Partes (también quedan en la carpeta chunks/)")
             with gr.Tab("🧬 Deep Swap — modelo entrenado (.dfm)"):
                 gr.Markdown(
-                    "Creá un **modelo `.dfm`** de una persona **todo desde la app**: cargás muchas fotos, "
-                    "la app las cura, **entrena en TU GPU** (DeepFaceLab DirectX12, en segundo plano) y al "
-                    "final exporta e importa el modelo. La Cara resultante monta con **geometría de cráneo "
-                    "completa** en cualquier video. ⏱️ Realidad: el entrenamiento lleva **días** de GPU "
-                    "(podés parar/retomar y usar la PC; evitá procesar videos mientras entrena)."
+                    "Creá un **modelo entrenado** de una persona con **un botón**: cargá la mayor "
+                    "cantidad de fotos que puedas (mínimo ~10 HD variadas), poné un nombre y dale a "
+                    "**CREAR**. La app instala lo que falte, cura las fotos, **sintetiza** el dataset "
+                    "si son pocas, **entrena en tu GPU** en segundo plano y el **autopiloto** exporta "
+                    "y registra el modelo solo. Después lo elegís en **🎭 Face Swap → «🧬 Modelo DFM»**. "
+                    "⏱️ El entrenamiento lleva **días** (podés cerrar la app; sigue solo)."
                 )
                 with gr.Row():
                     with gr.Column():
-                        gr.Markdown("#### ① Cargar fotos → curar → crear la Cara")
-                        cm_name = gr.Textbox(label="Nombre de la persona/modelo", placeholder="Cara 1")
+                        gr.Markdown("#### 🧬 Crear modelo")
+                        cm_name = gr.Textbox(label="Nombre del modelo/persona", placeholder="Cara 1")
                         cm_files = gr.Files(
-                            label="Muchas fotos de la persona (500-2000 ideal; ángulos/expresiones variados)",
+                            label="Fotos de la persona (mínimo ~10 HD variadas; cuantas más, mejor)",
                             file_count="multiple", file_types=["image"], type="filepath",
                         )
-                        cm_build_btn = gr.Button("① Curar fotos + crear Cara", variant="primary")
-                        cm_report = gr.Markdown("", elem_classes="fuser-soft")
-                        with gr.Accordion("Paquete para entrenar en la nube (opcional)", open=False):
-                            cm_bundle = gr.File(label="⬇️ Paquete de fotos curadas (ver CLOUD_TRAIN.md)")
-                        cm_next = gr.Markdown("", elem_classes="fuser-soft")
-
-                        gr.Markdown("#### ② Instalar el entrenador local (una sola vez)")
-                        gr.Markdown(
-                            "Descarga automática del build **DeepFaceLab DirectX12** + el preentrenado "
-                            "**RTT 224** (~4 GB en total, a `E:\\modelos\\deepfacelab`). Sin pasos manuales.",
-                            elem_classes="fuser-soft",
-                        )
-                        cm_install_btn = gr.Button("② Instalar entrenador local", variant="secondary")
-                        cm_install_status = gr.Markdown(_trainer_status_md(), elem_classes="fuser-soft")
+                        with gr.Accordion("Opcional: videos destino (modelo a medida de ESOS videos)",
+                                          open=False):
+                            gr.Markdown(
+                                "Sin videos, el modelo sale **universal** (sirve para cualquier video; "
+                                "usa el set genérico que la app ya descarga sola).",
+                                elem_classes="fuser-soft",
+                            )
+                            cm_dst_videos = gr.Files(
+                                label="Videos destino (opcional)",
+                                file_count="multiple", file_types=["video"], type="filepath",
+                            )
+                        cm_create_btn = gr.Button(
+                            "🧬 CREAR MODELO DFM (todo automático)", variant="primary")
+                        cm_status = gr.Markdown(_trainer_status_md(), elem_classes="fuser-soft")
                     with gr.Column():
-                        gr.Markdown("#### ③ Preparar → ④ Entrenar → ⑤ Exportar")
+                        gr.Markdown("#### 📈 Seguimiento del entrenamiento")
                         cm_model_cara = gr.Dropdown(
-                            choices=face_library.list_faces(), label="Cara / modelo a entrenar")
-                        cm_dst_videos = gr.Files(
-                            label="Videos destino (OPCIONAL): si los cargás, el modelo aprende las "
-                                  "condiciones de ESOS videos. Si lo dejás vacío, la app usa un set "
-                                  "genérico (descarga única ~8.8 GB) y el modelo sirve para CUALQUIER video.",
-                            file_count="multiple", file_types=["video"], type="filepath",
-                        )
-                        cm_prepare_btn = gr.Button("③ Preparar entrenamiento", variant="secondary")
+                            choices=face_library.list_faces(), label="Modelo")
                         with gr.Row():
-                            cm_train_btn = gr.Button("④ ▶️ Entrenar", variant="primary")
-                            cm_stop_btn = gr.Button("⏸️ Parar", variant="secondary")
                             cm_refresh_btn = gr.Button("🔄 Estado", variant="secondary")
+                            cm_stop_btn = gr.Button("⏸️ Pausar", variant="secondary")
+                            cm_resume_btn = gr.Button("▶️ Retomar", variant="secondary")
+                        cm_finish_btn = gr.Button("⏹️ Terminar y exportar YA", variant="stop")
                         cm_train_status = gr.Markdown("", elem_classes="fuser-soft")
-                        cm_export_btn = gr.Button("⑤ 📦 Exportar .dfm e importarlo a la Cara",
-                                                  variant="primary")
-                        cm_import_status = gr.Markdown(_dfm_library_status(), elem_classes="fuser-soft")
                         with gr.Accordion("Importar un .dfm entrenado afuera (opcional)", open=False):
                             cm_dfm_file = gr.File(label=".dfm", file_types=[".dfm"], type="filepath")
-                            cm_import_btn = gr.Button("Importar este .dfm a la Cara elegida")
+                            cm_import_btn = gr.Button("Importar este .dfm al modelo elegido")
+                        cm_import_status = gr.Markdown(_dfm_library_status(), elem_classes="fuser-soft")
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
@@ -1491,35 +1491,29 @@ def build_interface() -> gr.Blocks:
             inputs=lib_delete,
             outputs=[face_choice, lib_delete, cm_model_cara, lib_status],
         )
-        # Pestaña "🧬 Crear modelo (.dfm)"
-        cm_build_btn.click(
-            _on_create_model,
-            inputs=[cm_name, cm_files],
-            outputs=[cm_report, cm_bundle, cm_next, face_choice, lib_delete, cm_model_cara],
+        # Pestaña "🧬 Deep Swap" — un botón crea todo; el resto es seguimiento.
+        cm_create_btn.click(
+            _on_create_dfm,
+            inputs=[cm_name, cm_files, cm_dst_videos],
+            outputs=[cm_train_status, face_choice, lib_delete, cm_model_cara],
         )
-        cm_install_btn.click(_on_trainer_install, inputs=None, outputs=cm_install_status)
-        cm_prepare_btn.click(
-            _on_trainer_prepare,
-            inputs=[cm_model_cara, cm_dst_videos],
-            outputs=cm_train_status,
-        )
-        cm_train_btn.click(_on_trainer_start, inputs=cm_model_cara, outputs=cm_train_status)
-        cm_stop_btn.click(_on_trainer_stop, inputs=cm_model_cara, outputs=cm_train_status)
         cm_refresh_btn.click(_on_trainer_refresh, inputs=cm_model_cara, outputs=cm_train_status)
-        cm_export_btn.click(
-            _on_trainer_export,
+        cm_stop_btn.click(_on_trainer_stop, inputs=cm_model_cara, outputs=cm_train_status)
+        cm_resume_btn.click(_on_trainer_resume, inputs=cm_model_cara, outputs=cm_train_status)
+        cm_finish_btn.click(
+            _on_finish_export,
             inputs=cm_model_cara,
-            outputs=[cm_import_status, cm_dfm_file],
+            outputs=[cm_train_status, dfm_choice],
         )
         cm_import_btn.click(
             _on_import_dfm,
             inputs=[cm_model_cara, cm_dfm_file],
-            outputs=[cm_import_status, cm_dfm_file],
+            outputs=[cm_import_status, cm_dfm_file, dfm_choice],
         )
 
         preview_btn.click(
             _on_preview,
-            inputs=[source_files, face_choice, target_video, n_preview, *control_inputs],
+            inputs=[source_files, face_choice, dfm_choice, target_video, n_preview, *control_inputs],
             outputs=[preview_gallery, status_md],
         )
         cmp_btn.click(
@@ -1529,17 +1523,17 @@ def build_interface() -> gr.Blocks:
         )
         process_btn.click(
             _on_process,
-            inputs=[source_files, face_choice, target_video, *control_inputs],
+            inputs=[source_files, face_choice, dfm_choice, target_video, *control_inputs],
             outputs=[output_video, output_file, status_md],
         )
         max_swap_btn.click(
             _on_maximum_swap,
-            inputs=[source_files, face_choice, target_video],   # nuclear: ignora los controles
+            inputs=[source_files, face_choice, dfm_choice, target_video],   # nuclear: ignora los controles
             outputs=[output_video, output_file, status_md, ba_slider],
         )
         queue_btn.click(
             _on_process_queue,
-            inputs=[source_files, face_choice, video_queue, *control_inputs],
+            inputs=[source_files, face_choice, dfm_choice, video_queue, *control_inputs],
             outputs=[queue_results, queue_status],
         )
         split_btn.click(
@@ -1548,4 +1542,10 @@ def build_interface() -> gr.Blocks:
             outputs=[split_results, split_status],
         )
 
+    # Autopiloto de entrenamiento .dfm: exporta/registra solo al llegar al objetivo.
+    try:
+        from ..core import dfm_trainer as _dt
+        _dt.start_autopilot()
+    except Exception:  # pragma: no cover - nunca debe romper la UI
+        log.warning("No pude iniciar el autopiloto de .dfm", exc_info=True)
     return demo
