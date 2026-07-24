@@ -261,6 +261,60 @@ def _on_import_dfm(cara, dfm_file):
     return f"{msg}\n\n{_dfm_library_status()}", gr.update(value=None)
 
 
+def _on_create_model(name, files, progress=gr.Progress()):
+    """Pestaña 🧬 Crear modelo: cura las fotos, crea la Cara y arma el paquete
+    de entrenamiento (.zip) para llevar a la nube/DeepFaceLab.
+
+    Salidas: [cm_report, cm_bundle, cm_next, face_choice, lib_delete, dfm_cara, cm_dfm_cara].
+    """
+    from ..core import faceset
+    name = (name or "").strip()
+    nofill = (gr.update(),) * 4
+    if not name:
+        return ("⚠️ Poné un nombre para el modelo/persona.", None, "", *nofill)
+    paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in (files or [])]
+    paths = [p for p in paths if p]
+    if len(paths) < 10:
+        return ("⚠️ Subí bastantes fotos (idealmente 500-2000; mínimo ~10 para probar el flujo).",
+                None, "", *nofill)
+
+    out_dir = config.OUTPUTS_DIR / ("faceset_" + face_library._slug(name))
+    import shutil as _sh
+    _sh.rmtree(out_dir, ignore_errors=True)
+    progress(0.05, desc="Curando fotos…")
+    rep = faceset.curate(paths, out_dir=out_dir,
+                         progress=lambda f, m="": progress(0.05 + f * 0.8, desc=m))
+    if rep["kept"] == 0:
+        return ("No quedó ninguna foto útil:\n\n" + faceset.format_report_md(rep), None, "", *nofill)
+
+    progress(0.9, desc="Creando la Cara…")
+    try:
+        face_library.save_face(name, rep["kept_paths"][:face_library.MAX_IMAGES])
+    except ValueError as exc:
+        return (f"⚠️ {exc}", None, "", *nofill)
+
+    progress(0.95, desc="Armando el paquete de entrenamiento…")
+    bundle = faceset.make_bundle(out_dir, name)
+
+    report_md = ("### ✅ Curado\n\n" + faceset.format_report_md(rep)
+                 + f"\n\n**Cara «{name}» creada** (con las mejores fotos, para el swap one-shot y para "
+                   "colgarle el `.dfm` después).")
+    next_md = (
+        f"### ▶️ Ahora entrená el modelo\n\n"
+        f"1. **Descargá** el paquete de abajo (`{bundle.name}`) — son tus fotos curadas.\n"
+        f"2. Seguí **`CLOUD_TRAIN.md`** (guía paso a paso): entrenás en la **nube** (~US$5-20, medio día) "
+        f"o local. Ese crunch de GPU es el único paso que NO corre dentro de Fuser.\n"
+        f"3. Cuando tengas el `.dfm`, volvé acá al **paso ②** e importalo a «{name}». "
+        f"Esa Cara va a montar con geometría de cráneo completa en cualquier video."
+    )
+    faces = face_library.list_faces()
+    return (report_md, str(bundle), next_md,
+            gr.update(choices=[NO_FACE] + faces),           # face_choice
+            gr.update(choices=faces),                       # lib_delete
+            gr.update(choices=faces),                       # dfm_cara (Biblioteca)
+            gr.update(choices=faces, value=name))           # cm_dfm_cara (esta pestaña)
+
+
 def _on_save_face(name, files):
     """Guarda/reemplaza una Cara de la Biblioteca y refresca los desplegables."""
     paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in (files or [])]
@@ -1239,6 +1293,37 @@ def build_interface() -> gr.Blocks:
                         split_status = gr.Markdown("", elem_classes="fuser-soft")
                         split_results = gr.Files(
                             label="⬇️ Partes (también quedan en la carpeta chunks/)")
+            with gr.Tab("🧬 Crear modelo (.dfm)"):
+                gr.Markdown(
+                    "Creá un **modelo `.dfm`** de una persona (identidad de máxima fidelidad + "
+                    "**geometría de cráneo completa**). Cargás **muchas fotos**, la app las **cura** y "
+                    "arma el **paquete de entrenamiento**. El crunch de GPU corre en la **nube** (o local) "
+                    "porque es DeepFaceLab y no puede vivir dentro de Fuser sin romper DirectML; después "
+                    "**importás el `.dfm`** acá y esa Cara monta en cualquier video. Guía: **`CLOUD_TRAIN.md`**."
+                )
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("#### ① Cargar fotos y preparar")
+                        cm_name = gr.Textbox(label="Nombre de la persona/modelo", placeholder="Cara 1")
+                        cm_files = gr.Files(
+                            label="Muchas fotos de la persona (500-2000 ideal; ángulos/expresiones variados)",
+                            file_count="multiple", file_types=["image"], type="filepath",
+                        )
+                        cm_build_btn = gr.Button(
+                            "① Curar fotos + crear Cara + armar paquete", variant="primary")
+                        cm_report = gr.Markdown("", elem_classes="fuser-soft")
+                        cm_bundle = gr.File(label="⬇️ Paquete de entrenamiento (subilo a la nube)")
+                        cm_next = gr.Markdown("", elem_classes="fuser-soft")
+                    with gr.Column():
+                        gr.Markdown("#### ② Importar el .dfm entrenado")
+                        gr.Markdown(
+                            "Cuando termines de entrenar (ver `CLOUD_TRAIN.md`), subí el `.dfm`, asocialo "
+                            "a la Cara y **reiniciá Fuser**.", elem_classes="fuser-soft",
+                        )
+                        cm_dfm_cara = gr.Dropdown(choices=face_library.list_faces(), label="Cara")
+                        cm_dfm_file = gr.File(label=".dfm entrenado", file_types=[".dfm"], type="filepath")
+                        cm_import_btn = gr.Button("② Importar .dfm a la Cara", variant="secondary")
+                        cm_import_status = gr.Markdown(_dfm_library_status(), elem_classes="fuser-soft")
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
@@ -1291,6 +1376,17 @@ def build_interface() -> gr.Blocks:
             _on_import_dfm,
             inputs=[dfm_cara, dfm_file],
             outputs=[dfm_status, dfm_file],
+        )
+        # Pestaña "🧬 Crear modelo (.dfm)"
+        cm_build_btn.click(
+            _on_create_model,
+            inputs=[cm_name, cm_files],
+            outputs=[cm_report, cm_bundle, cm_next, face_choice, lib_delete, dfm_cara, cm_dfm_cara],
+        )
+        cm_import_btn.click(
+            _on_import_dfm,
+            inputs=[cm_dfm_cara, cm_dfm_file],
+            outputs=[cm_import_status, cm_dfm_file],
         )
 
         preview_btn.click(
