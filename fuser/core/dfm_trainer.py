@@ -404,20 +404,38 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
     for d in (data_src, data_dst, model):
         d.mkdir(parents=True, exist_ok=True)
 
-    # 1) SRC: copiar fotos curadas
-    if progress:
-        progress(0.05, "Copiando fotos fuente…")
-    n = 0
-    for i, f in enumerate(sorted(src_dir.iterdir())):
-        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
-            shutil.copyfile(f, data_src / f"{i:05d}{f.suffix.lower()}")
-            n += 1
+    real_files = [f for f in sorted(src_dir.iterdir())
+                  if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp")]
+    n_real = len(real_files)
 
-    dst_mode = "videos" if dst_videos else "universal"
-    if dst_videos:
-        # 2a) DST: frames de los videos del usuario (cap total ~1500 frames)
+    def _extract_faces(in_dir: Path, phase_name: str, frac: float, timeout: int = 14400) -> int:
+        """Extractor S3FD de DFL → aligned/. JPEG q100 = sin pérdida visible."""
         if progress:
-            progress(0.1, "Extrayendo frames de tus videos…")
+            progress(frac, f"Detectando caras ({phase_name}) — puede tardar bastante…")
+        out_aligned = in_dir / "aligned"
+        out_aligned.mkdir(exist_ok=True)
+        logf = ws.parent / "prepare.log"
+        proc = _run_dfl([
+            "extract", "--input-dir", str(in_dir), "--output-dir", str(out_aligned),
+            "--detector", "s3fd", "--face-type", "whole_face",
+            "--max-faces-from-image", "1", "--image-size", "512", "--jpeg-quality", "100",
+            "--no-output-debug",
+        ], logf, stdin_text="\n" * 8)
+        rc = proc.wait(timeout=timeout)
+        n_faces = len(list(out_aligned.glob("*.jpg")))
+        if rc != 0 or n_faces == 0:
+            raise RuntimeError(
+                f"La extracción de caras ({phase_name}) falló (rc={rc}, caras={n_faces}). "
+                f"Mirá el log: {logf}")
+        return n_faces
+
+    # ---- 1) DST primero (además provee las caras DONANTES para la síntesis) ----
+    dst_mode = "videos" if dst_videos else "universal"
+    donor_files: List[Path] = []
+    if dst_videos:
+        # 1a) frames de los videos del usuario (cap total ~1500 frames)
+        if progress:
+            progress(0.05, "Extrayendo frames de tus videos…")
         total_frames = 0
         per_video = max(200, 1500 // max(1, len(dst_videos)))
         for vi, v in enumerate(dst_videos):
@@ -429,61 +447,66 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
                 import cv2
                 for fi, fr in enumerate(frames):
                     if fr is not None:
-                        cv2.imwrite(str(data_dst / f"v{vi:02d}_{fi:05d}.jpg"), fr,
-                                    [cv2.IMWRITE_JPEG_QUALITY, 92])
+                        # PNG sin pérdida: es material de entrenamiento
+                        cv2.imwrite(str(data_dst / f"v{vi:02d}_{fi:05d}.png"), fr)
                         total_frames += 1
             except Exception as exc:
                 log.warning("No pude extraer frames de %s: %s", v, exc)
         if total_frames == 0:
             raise ValueError("No pude extraer frames de los videos destino.")
+        _extract_faces(data_dst, "destino", 0.1)
+        donor_files = sorted((data_dst / "aligned").glob("*.jpg"))
     else:
-        # 2b) DST universal: faceset genérico RTM (ya alineado, NO se re-extrae).
+        # 1b) DST universal: faceset genérico RTM (ya alineado, NO se re-extrae).
         if progress:
-            progress(0.1, "Sin videos destino: preparando el faceset genérico (única vez ~8.8 GB)…")
+            progress(0.05, "Sin videos destino: preparando el faceset genérico (única vez ~8.8 GB)…")
         rtm_dir = _ensure_rtm(progress)
         aligned = data_dst / "aligned"
         aligned.mkdir(exist_ok=True)
-        pak = next(iter(rtm_dir.glob("faceset.pak")), None)
-        if pak is not None:
-            # DFL lee faceset.pak nativamente desde aligned/
-            shutil.copyfile(pak, aligned / "faceset.pak")
-        else:
-            # junction (sin copiar 8.8 GB): data_dst/aligned -> carpeta compartida
-            try:
-                aligned.rmdir()
-                subprocess.run(["cmd", "/c", "mklink", "/J", str(aligned), str(rtm_dir)],
-                               capture_output=True, timeout=30, check=True)
-            except Exception:
-                aligned.mkdir(exist_ok=True)
-                for i, f in enumerate(rtm_dir.glob("*.jpg")):
-                    shutil.copyfile(f, aligned / f.name)
+        donor_files = sorted(rtm_dir.glob("*.jpg"))
+        # junction (sin copiar 8.8 GB): data_dst/aligned -> carpeta compartida
+        try:
+            aligned.rmdir()
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(aligned), str(rtm_dir)],
+                           capture_output=True, timeout=30, check=True)
+        except Exception:
+            pak = next(iter(rtm_dir.glob("faceset.pak")), None)
+            if pak is not None:
+                shutil.copyfile(pak, aligned / "faceset.pak")
 
-    # 3) Extraer caras (WF) del SRC (y del DST solo si vino de videos)
-    logf = ws.parent / "prepare.log"
-    phases = [("fuente", data_src, 0.3)]
-    if dst_videos:
-        phases.append(("destino", data_dst, 0.6))
-    for phase_name, in_dir, frac in phases:
+    # ---- 2) SRC: con pocas fotos reales, SINTETIZAR el faceset ------------------
+    from . import faceset_synth
+    synth_info = None
+    if n_real < faceset_synth.SYNTH_THRESHOLD and donor_files:
         if progress:
-            progress(frac, f"Detectando caras ({phase_name}) — puede tardar varios minutos…")
-        out_aligned = in_dir / "aligned"
-        out_aligned.mkdir(exist_ok=True)
-        proc = _run_dfl([
-            "extract", "--input-dir", str(in_dir), "--output-dir", str(out_aligned),
-            "--detector", "s3fd", "--face-type", "whole_face",
-            "--max-faces-from-image", "1", "--image-size", "512", "--jpeg-quality", "90",
-            "--no-output-debug",
-        ], logf, stdin_text="\n" * 8)
-        rc = proc.wait(timeout=7200)
-        n_faces = len(list(out_aligned.glob("*.jpg")))
-        if rc != 0 or n_faces == 0:
-            raise RuntimeError(
-                f"La extracción de caras ({phase_name}) falló (rc={rc}, caras={n_faces}). "
-                f"Mirá el log: {logf}")
+            progress(0.2, f"Solo {n_real} fotos reales: sintetizando faceset "
+                          f"(~{min(faceset_synth.SYNTH_TARGET, len(donor_files))} caras; "
+                          f"puede tardar 1-2 h, una sola vez)…")
+        synth_dir = ws / "synth"
+        synth_info = faceset_synth.synthesize(
+            src_dir, donor_files, synth_dir,
+            progress=lambda f, m="": progress(0.2 + f * 0.4, m) if progress else None)
+        dup = faceset_synth.real_duplication(n_real, synth_info["synthetic"])
+        # dataset SRC = reales ×dup (ancla, ~15%) + sintéticas (cobertura de poses)
+        k = 0
+        for f in real_files:
+            for d in range(dup):
+                shutil.copyfile(f, data_src / f"real_{k:05d}{f.suffix.lower()}")
+                k += 1
+        for f in sorted(synth_dir.glob("*.png")):
+            shutil.copyfile(f, data_src / f.name)
+    else:
+        if progress:
+            progress(0.2, "Copiando fotos fuente…")
+        for i, f in enumerate(real_files):
+            shutil.copyfile(f, data_src / f"{i:05d}{f.suffix.lower()}")
 
-    # 4) Semilla del modelo: RTT (warm-start) + opciones seguras para 8GB DX12
+    # ---- 3) Extraer caras (WF) del SRC -----------------------------------------
+    n_src = _extract_faces(data_src, "fuente", 0.72)
+
+    # ---- 4) Semilla del modelo: RTT (warm-start) + opciones seguras 8GB DX12 ----
     if progress:
-        progress(0.9, "Sembrando el preentrenado RTT…")
+        progress(0.92, "Sembrando el preentrenado RTT…")
     p = _paths()
     seeded = 0
     for f in p["rtt"].rglob("*"):
@@ -497,12 +520,14 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
     n_dst = len(list((data_dst / "aligned").glob("*.jpg")))
     dst_txt = (f"{n_dst} caras destino (de tus videos)" if dst_videos
                else "faceset genérico universal (miles de caras)")
+    src_txt = (f"{n_src} caras fuente ({n_real} reales ancladas + "
+               f"{synth_info['synthetic']} sintetizadas con el motor 🎯➕)" if synth_info
+               else f"{n_src} caras fuente")
     _write_state(slug, phase="prepared", dst_mode=dst_mode,
-                 src_faces=len(list((data_src / 'aligned').glob('*.jpg'))),
-                 dst_faces=n_dst,
+                 src_faces=n_src, dst_faces=n_dst,
+                 synthetic=(synth_info or {}).get("synthetic", 0), real=n_real,
                  prepared_at=time.strftime("%Y-%m-%d %H:%M:%S"))
-    stx = _read_state(slug)
-    return (f"✅ Workspace listo: {stx['src_faces']} caras fuente · {dst_txt} · "
+    return (f"✅ Workspace listo: {src_txt} · {dst_txt} · "
             f"modelo sembrado del RTT (pretrain OFF, batch 4). Ya podés entrenar.")
 
 

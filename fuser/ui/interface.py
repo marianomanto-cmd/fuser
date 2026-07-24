@@ -1052,343 +1052,346 @@ def build_interface() -> gr.Blocks:
                 system_md = gr.Markdown(format_system_summary(), elem_classes="fuser-soft")
                 refresh_btn = gr.Button("🔄 Actualizar estado del sistema", size="sm")
 
-        # ===== Layout principal de 3 columnas =====
-        with gr.Row(equal_height=False):
-            # --------- COLUMNA IZQUIERDA: entradas ---------
-            with gr.Column(scale=1, min_width=320):
-                with gr.Group():
-                    gr.Markdown("#### 🙂 Source Face")
-                    face_choice = gr.Dropdown(
-                        choices=_face_choices(), value=NO_FACE,
-                        label="🗂️ Cara guardada (Biblioteca)",
-                        info="Elegí una cara ya guardada y te salteás subir fotos. "
-                             "Si elegís una, tiene prioridad sobre las imágenes de abajo.",
-                    )
-                    source_files = gr.Files(
-                        label="…o subí imagen(es) fuente (la cara a aplicar)",
-                        file_count="multiple", file_types=["image"], type="filepath",
-                    )
-                    gr.Markdown(REFERENCE_TIP, elem_classes="fuser-soft")
-                with gr.Accordion("🗂️ Biblioteca de Caras — crear / borrar", open=False):
-                    gr.Markdown(
-                        "Guardá una persona con **varias fotos** (distintos ángulos y "
-                        "expresiones = más identidad). Después la elegís arriba y solo subís el video. "
-                        "*(No entrena un modelo `.dfm`; guarda la identidad multi-referencia.)*",
-                        elem_classes="fuser-soft",
-                    )
-                    lib_name = gr.Textbox(label="Nombre de la cara", placeholder="Cara 1")
-                    lib_files = gr.Files(
-                        label="Fotos de esta persona (varias)",
-                        file_count="multiple", file_types=["image"], type="filepath",
-                    )
-                    lib_save_btn = gr.Button("💾 Guardar cara", variant="secondary")
-                    with gr.Row():
-                        lib_delete = gr.Dropdown(
-                            choices=face_library.list_faces(), label="Borrar cara guardada", scale=3,
-                        )
-                        lib_delete_btn = gr.Button("🗑️ Borrar", scale=1)
-                    lib_status = gr.Markdown("", elem_classes="fuser-soft")
-                    gr.Markdown(
-                        "🧬 ¿Querés un **modelo entrenado** de una persona (máxima geometría)? "
-                        "Pestaña **«Crear modelo (.dfm)»** abajo.", elem_classes="fuser-soft",
-                    )
-                with gr.Group():
-                    gr.Markdown("#### 🎬 Target Video")
-                    target_video = gr.Video(label="Vídeo objetivo")
-                with gr.Group():
-                    gr.Markdown("#### 🎤 Preset Mode")
-                    expression_mode = gr.Dropdown(
-                        choices=list(config.EXPRESSION_MODE_LABELS.items()),
-                        value=config.EXPR_STANDARD,
-                        label="Modo (ajusta la calidad automáticamente)",
-                        info="Un clic configura motor, enhancer, máscaras, ojos/boca, 2 pasadas y RAM. "
-                             "'Videos musicales' = el mejor preajuste para caras cantando.",
-                    )
-                    recommendation_md = gr.Markdown(
-                        _recommendation(config.EXPR_STANDARD, config.ENGINE_FACEFUSION),
-                        elem_classes="fuser-soft",
-                    )
-
-            # --------- COLUMNA CENTRAL: preview + resultado ---------
-            with gr.Column(scale=1, min_width=340):
-                with gr.Group():
-                    gr.Markdown("#### 👁️ Preview")
-                    n_preview = gr.Slider(
-                        2, 12, value=6, step=1, label="Frames de previsualización",
-                        info="Cuántos frames clave procesar para ver el resultado antes del vídeo "
-                             "completo (incluye uno con boca abierta y uno de perfil).",
-                    )
-                    preview_btn = gr.Button("👁️ Previsualizar frames clave", variant="secondary")
-                    preview_gallery = gr.Gallery(label="Previsualización", columns=3, object_fit="contain")
-                    status_md = gr.Markdown("", elem_classes="fuser-soft")
-                with gr.Group():
-                    gr.Markdown("#### 🎉 Resultado")
-                    output_video = gr.Video(label="Vídeo resultado")
-                    output_file = gr.File(label="⬇️ Descargar resultado")
-                    ba_slider = gr.ImageSlider(
-                        label="🆚 Antes / Después (frame central — arrastrá el divisor)",
-                        type="numpy", visible=True,
-                    )
-                gr.Markdown(
-                    "🔬 *¿No sabés qué modelo usa mejor tu cara? Probá la pestaña "
-                    "**Comparar modelos** abajo.*  ·  ⏭️✂️ *Cola y cortar video: pestaña "
-                    "**Más herramientas**.*",
-                    elem_classes="fuser-soft",
-                )
-
-            # --------- COLUMNA DERECHA: calidad y controles ---------
-            with gr.Column(scale=1, min_width=340):
-                with gr.Group():
-                    gr.Markdown("#### ✨ Quality")
-                    # FaceFusion es el ÚNICO motor. engine/swapper_model quedan como
-                    # ESTADO OCULTO (no se eligen en la UI) para no duplicar el selector
-                    # de modelo: el swap se elige UNA sola vez con "Modelo de swap".
-                    engine = gr.State(config.ENGINE_FACEFUSION)
-                    swapper_model = gr.State("inswapper_128")
-                    with gr.Row():
-                        ff_swapper_model = gr.Dropdown(
-                            choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
-                            label="🧬 Modelo de swap",
-                            info="El modelo que reemplaza la identidad. inswapper_128 = el más ESTABLE "
-                                 "(no se 'mueve'). hififace / ghost_2 / ghost_3 (256 px) = más "
-                                 "identidad y forma (mejor con Pixel boost 512). El preset 🔥 MÁXIMO "
-                                 "usa hififace + 512.",
-                        )
-                        ff_pixel_boost = gr.Dropdown(
-                            choices=config.FF_PIXEL_BOOST_CHOICES, value="native",
-                            label="🔎 Pixel boost (resolución interna del swap)",
-                            info="Auto = nativa del modelo (rápido). 512 = más detalle fino (la cara "
-                                 "se procesa en 4 pasadas entrelazadas → swap más lento). Combo de "
-                                 "máxima calidad: hififace + 512 + máscara bisenet.",
-                        )
-                    with gr.Row():
-                        enhancer_model = gr.Dropdown(
-                            choices=config.ENHANCER_CHOICES, value="gfpgan_1.4",
-                            label="Enhancer (restaurador)",
-                            info="GFPGAN = natural y rápido; CodeFormer = más nítido (mejor en dientes).",
-                        )
-                        enhancer_blend = gr.Slider(
-                            0.0, 1.0, value=0.8, step=0.05, label="Fuerza del enhancer",
-                            info="Cuánto se mezcla el realce (0 = nada, 1 = máximo).",
-                        )
-                    with gr.Row():
-                        codeformer_fidelity = gr.Slider(
-                            0.0, 1.0, value=0.7, step=0.05, label="Fidelidad CodeFormer",
-                            info="Solo CodeFormer: 0 = más detalle/nítido, 1 = más fiel al original.",
-                        )
-
-                with gr.Accordion("👁️ Ajuste fino: ojos / boca / máscara (opcional)", open=False):
-                    with gr.Row():
-                        eye_preservation = gr.Slider(
-                            0.0, 1.0, value=0.4, step=0.05, label="👁️ Preservación de ojos",
-                            info="Realza los ojos para que no queden 'muertos'. Sube si la mirada pierde vida.",
-                        )
-                        mouth_detail = gr.Slider(
-                            0.0, 1.0, value=0.4, step=0.05, label="👄 Detalle de boca/dientes",
-                            info="Realza dientes/interior de la boca. Actúa más fuerte con la boca abierta.",
-                        )
-                    with gr.Row():
-                        skin_detail = gr.Slider(
-                            0.0, 1.0, value=0.35, step=0.05, label="🧴 Textura de piel (anti-plástico)",
-                            info="Reinyecta la textura/poros del video original sobre la cara swapeada. "
-                                 "Sube si la piel se ve cerosa/plástica; baja si aparece grano de más.",
-                        )
-                    with gr.Row():
-                        mouth_enhancer = gr.Checkbox(
-                            value=True, label="🦷 Enhancer localizado de boca (CodeFormer, FaceFusion)",
-                            info="2.º pase de CodeFormer SOLO en la boca abierta (FaceFusion). Dientes más nítidos.",
-                        )
-                        color_match = gr.Checkbox(
-                            value=False, label="Igualar color al original (iluminación)",
-                            info="Adapta el tono de la cara nueva al del vídeo. Útil con luces de escenario.",
-                        )
-                    with gr.Row():
-                        mask_mode = gr.Dropdown(
-                            choices=list(config.MASK_MODE_LABELS.items()), value=config.MASK_HULL,
-                            label="🎭 Tipo de máscara",
-                            info="'Contorno' sigue el rostro real (ideal perfiles); 'Rectángulo' es lo más básico.",
-                        )
-                        face_opacity = gr.Slider(
-                            0.1, 1.0, value=1.0, step=0.05, label="Fuerza del swap (opacidad)",
-                            info="Intensidad del intercambio. <1 deja ver algo de la cara original.",
-                        )
-                    with gr.Row():
-                        mask_blur = gr.Slider(
-                            0.0, 0.8, value=0.25, step=0.05, label="Suavizado del borde",
-                            info="Difumina el borde de la máscara. Súbelo si ves una costura marcada.",
-                        )
-                        mask_padding = gr.Slider(
-                            0.0, 0.4, value=0.0, step=0.02, label="Recorte interior",
-                            info="Encoge la máscara hacia dentro para no invadir pelo/frente/orejas.",
-                        )
-
-                with gr.Accordion("⚙️ FaceFusion avanzado (boca / perfiles)", open=False):
-                    with gr.Row():
-                        use_mouth_pixel_boost = gr.Checkbox(
-                            value=True, label="Pixel boost localizado de boca (512)",
-                            info="Reprocesa la boca con CodeFormer a 512 cuando está abierta. Dientes más definidos.",
-                        )
-                        mouth_enhancement_strength = gr.Slider(
-                            0.0, 2.0, value=1.0, step=0.1, label="Fuerza del enhancer de boca",
-                            info="Multiplica la fuerza del realce localizado de boca (1.0 = normal, >1 = agresivo).",
-                        )
-                        profile_blending_strength = gr.Slider(
-                            0.0, 1.0, value=0.5, step=0.05, label="Blending en perfiles",
-                            info="En caras de lado recupera el borde original (mandíbula/oreja) para evitar deformación.",
-                        )
-
-                with gr.Accordion("👥 Selección de caras y multi-referencia", open=False):
-                    with gr.Row():
-                        face_selector = gr.Dropdown(
-                            choices=list(config.FACE_SELECTOR_LABELS.items()),
-                            value=config.FACE_SELECTOR_ALL, label="¿A qué caras aplicar el swap?",
-                            info="Todas, la más grande, una persona (por referencia) o por posición.",
-                        )
-                        reference_count = gr.Dropdown(
-                            choices=config.REFERENCE_COUNT_CHOICES, value=0,
-                            label="Nº de imágenes de referencia",
-                            info="Cuántas fotos de origen combinar. 4–6 = más consistencia. No cuesta VRAM extra.",
-                        )
-                    with gr.Row():
-                        reference_index = gr.Number(
-                            value=0, precision=0, label="Índice de cara (izq→der)",
-                            info="Para 'por posición'/'por referencia': qué cara del vídeo (0 = la primera).",
-                        )
-                        reference_distance = gr.Slider(
-                            0.5, 2.0, value=1.2, step=0.05, label="Tolerancia de referencia",
-                            info="En modo 'por referencia': qué tan parecida debe ser para considerarla la misma persona.",
-                        )
-
-                with gr.Accordion("🎞️ Temporal (estabilidad / movimiento)", open=False):
-                    with gr.Row():
-                        temporal_smoothing = gr.Checkbox(
-                            value=True, label="Suavizado temporal",
-                            info="Reduce el temblor de la cara entre frames.",
-                        )
-                        motion_adaptive = gr.Checkbox(
-                            value=True, label="Adaptativo al movimiento (sin lag)",
-                            info="Suaviza el temblor pero reacciona al instante (la boca al cantar no se arrastra).",
-                        )
-                    with gr.Row():
-                        temporal_alpha = gr.Slider(
-                            0.0, 0.9, value=0.55, step=0.05, label="Intensidad del suavizado",
-                            info="Más alto = más estable, pero puede dar 'lag' en movimientos rápidos.",
-                        )
-                        two_pass_temporal = gr.Checkbox(
-                            value=False, label="2 pasadas (máxima estabilidad, usa RAM)",
-                            info="Analiza un tramo en RAM y estabiliza con ventana centrada (sin lag). Más calidad.",
-                        )
-
-                with gr.Accordion("🧠 Memoria y rendimiento", open=False):
-                    with gr.Row():
-                        memory_mode = gr.Dropdown(
-                            choices=list(config.MEMORY_MODE_LABELS.items()),
-                            value=config.MODE_BALANCED, label="Modo de memoria (VRAM)",
-                            info="Baja a 'Bajo VRAM' / 'VRAM mínima' si da error de memoria de GPU.",
-                        )
-                        ram_mode = gr.Dropdown(
-                            choices=list(config.RAM_MODE_LABELS.items()),
-                            value=config.RAM_BALANCED, label="Uso de RAM (buffers / 2 pasadas)",
-                            info="'Máximo' aprovecha 32 GB+ (la GPU casi nunca espera).",
-                        )
-                        gpu_mem_limit = gr.Slider(
-                            0.0, 12.0, value=0.0, step=0.5, label="Límite VRAM/sesión (GB, 0=auto)",
-                            info="Tope de VRAM por modelo. 0 = automático según el modo.",
-                        )
-                    with gr.Row():
-                        processing_resolution = gr.Dropdown(
-                            choices=[("Nativa (máxima calidad)", 0), ("1440p", 1440), ("1080p", 1080),
-                                     ("720p (rápido)", 720), ("512p (muy rápido)", 512)],
-                            value=0, label="Resolución de procesamiento",
-                            info="Menor = más rápido y menos memoria, pero menos detalle.",
-                        )
-                        force_cpu = gr.Checkbox(
-                            value=False, label="Forzar CPU (sin GPU)",
-                            info="Procesa sin GPU. Muy lento; solo para probar la UI.",
-                        )
-                        keep_audio = gr.Checkbox(value=True, label="Conservar audio")
-                        keep_fps = gr.Checkbox(value=True, label="Conservar FPS")
-                        output_quality = gr.Slider(
-                            12, 30, value=18, step=1, label="Calidad de salida (CRF)",
-                            info="H.264: menor = mejor calidad y archivo más pesado (18 es buen punto).",
-                        )
-                    mem_info_md = gr.Markdown(
-                        _memory_panel(config.ENGINE_FACEFUSION, config.RAM_BALANCED,
-                                      config.MODE_BALANCED, False),
-                        elem_classes="fuser-soft",
-                    )
-
-                with gr.Group():
-                    gr.Markdown("#### 🚀 Process")
-                    qc_second_pass = gr.Checkbox(
-                        value=False, label="🔍 2ª pasada: detectar y corregir defectos",
-                        info="Al terminar el vídeo, hace un repaso: detecta frames defectuosos "
-                             "(cara sin swapear, borrosa, identidad rara o salto) y los CORRIGE con "
-                             "el MISMO modelo (re-swap con detección agresiva o relleno desde vecinos "
-                             "buenos). Suma tiempo al final; usa RAM (mejor en clips cortos).",
-                    )
-                    qc_sensitivity = gr.Slider(
-                        0.0, 1.0, value=0.5, step=0.05, label="Sensibilidad de la 2ª pasada",
-                        info="0 = solo defectos claros · 1 = agresivo (marca y corrige más frames).",
-                    )
-                    process_btn = gr.Button("Procesar vídeo completo", variant="primary")
-                    max_swap_btn = gr.Button(
-                        "🚀 MAXIMUM SWAP — máxima fidelidad (lento)",
-                        variant="primary", elem_id="max-swap-btn",
-                    )
-                    gr.Markdown(
-                        "_**MAXIMUM SWAP** ignora los controles y corre el pipeline completo de "
-                        "máxima calidad: swap a **pixel boost 512** multi-referencia, máscaras "
-                        "**xseg_2 + bisenet**, CodeFormer + realce de boca/ojos + textura de piel, "
-                        "**armonización de color/iluminación**, 2 pasadas temporales y **QC** "
-                        "anti-defectos. Tarda varias veces más que el modo normal._",
-                        elem_classes="fuser-soft",
-                    )
-
-        # ===== Más modos: comparar modelos · herramientas =====
-        gr.Markdown("### 🧭 Más modos y herramientas")
+        # ===== Pestañas principales: Face Swap | Deep Swap ==================
         with gr.Tabs():
-            with gr.Tab("🔬 Comparar modelos"):
-                gr.Markdown(
-                    "Probá varios modelos de swap sobre **tu** cara y **tu** video, en los mismos "
-                    "frames clave. El mejor **depende de tu cara** (lo medimos: *ghost_3* suele ganar "
-                    "en identidad, pero a veces *hififace*/*simswap* quedan mejor). Usa las mismas "
-                    "**imágenes fuente** y el mismo **vídeo** de la izquierda.\n\n"
-                    "⏱️ *Cada modelo corre en su propio proceso (por cómo DirectML retiene la VRAM), "
-                    "así que tarda ~10–20 s por modelo.*"
-                )
-                cmp_models = gr.CheckboxGroup(
-                    choices=config.FF_SWAPPER_CHOICES,
-                    value=["ghost_3_256", "hififace_unofficial_256", "simswap_256", "inswapper_128"],
-                    label="Modelos a comparar (elegí 2 o más)",
-                )
-                with gr.Row():
-                    cmp_frames = gr.Slider(2, 6, value=3, step=1, label="Frames clave por modelo")
-                    cmp_btn = gr.Button("🔬 Comparar en mi material", variant="primary")
-                cmp_gallery = gr.Gallery(
-                    label="Comparación recortada a la cara (ORIGINAL · modelos)",
-                    columns=5, object_fit="contain", height=440,
-                )
-                cmp_status = gr.Markdown("", elem_classes="fuser-soft")
-            with gr.Tab("🧰 Más herramientas"):
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("#### ⏭️ Cola de trabajos (mismo set de fuentes)")
-                        video_queue = gr.Files(
-                            label="Videos cortos a procesar en cola (uno tras otro)",
-                            file_count="multiple", file_types=["video"], type="filepath",
+            with gr.Tab("🎭 Face Swap"):
+                # ===== Layout principal de 3 columnas =====
+                with gr.Row(equal_height=False):
+                    # --------- COLUMNA IZQUIERDA: entradas ---------
+                    with gr.Column(scale=1, min_width=320):
+                        with gr.Group():
+                            gr.Markdown("#### 🙂 Source Face")
+                            face_choice = gr.Dropdown(
+                                choices=_face_choices(), value=NO_FACE,
+                                label="🗂️ Cara guardada (Biblioteca)",
+                                info="Elegí una cara ya guardada y te salteás subir fotos. "
+                                     "Si elegís una, tiene prioridad sobre las imágenes de abajo.",
+                            )
+                            source_files = gr.Files(
+                                label="…o subí imagen(es) fuente (la cara a aplicar)",
+                                file_count="multiple", file_types=["image"], type="filepath",
+                            )
+                            gr.Markdown(REFERENCE_TIP, elem_classes="fuser-soft")
+                        with gr.Accordion("🗂️ Biblioteca de Caras — crear / borrar", open=False):
+                            gr.Markdown(
+                                "Guardá una persona con **varias fotos** (distintos ángulos y "
+                                "expresiones = más identidad). Después la elegís arriba y solo subís el video. "
+                                "*(No entrena un modelo `.dfm`; guarda la identidad multi-referencia.)*",
+                                elem_classes="fuser-soft",
+                            )
+                            lib_name = gr.Textbox(label="Nombre de la cara", placeholder="Cara 1")
+                            lib_files = gr.Files(
+                                label="Fotos de esta persona (varias)",
+                                file_count="multiple", file_types=["image"], type="filepath",
+                            )
+                            lib_save_btn = gr.Button("💾 Guardar cara", variant="secondary")
+                            with gr.Row():
+                                lib_delete = gr.Dropdown(
+                                    choices=face_library.list_faces(), label="Borrar cara guardada", scale=3,
+                                )
+                                lib_delete_btn = gr.Button("🗑️ Borrar", scale=1)
+                            lib_status = gr.Markdown("", elem_classes="fuser-soft")
+                            gr.Markdown(
+                                "🧬 ¿Querés un **modelo entrenado** de una persona (máxima geometría)? "
+                                "Pestaña **«🧬 Deep Swap»** (arriba).", elem_classes="fuser-soft",
+                            )
+                        with gr.Group():
+                            gr.Markdown("#### 🎬 Target Video")
+                            target_video = gr.Video(label="Vídeo objetivo")
+                        with gr.Group():
+                            gr.Markdown("#### 🎤 Preset Mode")
+                            expression_mode = gr.Dropdown(
+                                choices=list(config.EXPRESSION_MODE_LABELS.items()),
+                                value=config.EXPR_STANDARD,
+                                label="Modo (ajusta la calidad automáticamente)",
+                                info="Un clic configura motor, enhancer, máscaras, ojos/boca, 2 pasadas y RAM. "
+                                     "'Videos musicales' = el mejor preajuste para caras cantando.",
+                            )
+                            recommendation_md = gr.Markdown(
+                                _recommendation(config.EXPR_STANDARD, config.ENGINE_FACEFUSION),
+                                elem_classes="fuser-soft",
+                            )
+
+                    # --------- COLUMNA CENTRAL: preview + resultado ---------
+                    with gr.Column(scale=1, min_width=340):
+                        with gr.Group():
+                            gr.Markdown("#### 👁️ Preview")
+                            n_preview = gr.Slider(
+                                2, 12, value=6, step=1, label="Frames de previsualización",
+                                info="Cuántos frames clave procesar para ver el resultado antes del vídeo "
+                                     "completo (incluye uno con boca abierta y uno de perfil).",
+                            )
+                            preview_btn = gr.Button("👁️ Previsualizar frames clave", variant="secondary")
+                            preview_gallery = gr.Gallery(label="Previsualización", columns=3, object_fit="contain")
+                            status_md = gr.Markdown("", elem_classes="fuser-soft")
+                        with gr.Group():
+                            gr.Markdown("#### 🎉 Resultado")
+                            output_video = gr.Video(label="Vídeo resultado")
+                            output_file = gr.File(label="⬇️ Descargar resultado")
+                            ba_slider = gr.ImageSlider(
+                                label="🆚 Antes / Después (frame central — arrastrá el divisor)",
+                                type="numpy", visible=True,
+                            )
+                        gr.Markdown(
+                            "🔬 *¿No sabés qué modelo usa mejor tu cara? Probá la pestaña "
+                            "**Comparar modelos** abajo.*  ·  ⏭️✂️ *Cola y cortar video: pestaña "
+                            "**Más herramientas**.*",
+                            elem_classes="fuser-soft",
                         )
-                        queue_btn = gr.Button("⏭️ Procesar cola", variant="primary")
-                        queue_status = gr.Markdown("", elem_classes="fuser-soft")
-                        queue_results = gr.Files(label="⬇️ Resultados de la cola (descargar)")
-                    with gr.Column():
-                        gr.Markdown("#### ✂️ Cortar video en partes")
-                        split_video = gr.Video(label="Video a cortar")
-                        split_btn = gr.Button("✂️ Cortar en 5 partes iguales", variant="secondary")
-                        split_status = gr.Markdown("", elem_classes="fuser-soft")
-                        split_results = gr.Files(
-                            label="⬇️ Partes (también quedan en la carpeta chunks/)")
-            with gr.Tab("🧬 Crear modelo (.dfm)"):
+
+                    # --------- COLUMNA DERECHA: calidad y controles ---------
+                    with gr.Column(scale=1, min_width=340):
+                        with gr.Group():
+                            gr.Markdown("#### ✨ Quality")
+                            # FaceFusion es el ÚNICO motor. engine/swapper_model quedan como
+                            # ESTADO OCULTO (no se eligen en la UI) para no duplicar el selector
+                            # de modelo: el swap se elige UNA sola vez con "Modelo de swap".
+                            engine = gr.State(config.ENGINE_FACEFUSION)
+                            swapper_model = gr.State("inswapper_128")
+                            with gr.Row():
+                                ff_swapper_model = gr.Dropdown(
+                                    choices=config.FF_SWAPPER_CHOICES, value="inswapper_128",
+                                    label="🧬 Modelo de swap",
+                                    info="El modelo que reemplaza la identidad. inswapper_128 = el más ESTABLE "
+                                         "(no se 'mueve'). hififace / ghost_2 / ghost_3 (256 px) = más "
+                                         "identidad y forma (mejor con Pixel boost 512). El preset 🔥 MÁXIMO "
+                                         "usa hififace + 512.",
+                                )
+                                ff_pixel_boost = gr.Dropdown(
+                                    choices=config.FF_PIXEL_BOOST_CHOICES, value="native",
+                                    label="🔎 Pixel boost (resolución interna del swap)",
+                                    info="Auto = nativa del modelo (rápido). 512 = más detalle fino (la cara "
+                                         "se procesa en 4 pasadas entrelazadas → swap más lento). Combo de "
+                                         "máxima calidad: hififace + 512 + máscara bisenet.",
+                                )
+                            with gr.Row():
+                                enhancer_model = gr.Dropdown(
+                                    choices=config.ENHANCER_CHOICES, value="gfpgan_1.4",
+                                    label="Enhancer (restaurador)",
+                                    info="GFPGAN = natural y rápido; CodeFormer = más nítido (mejor en dientes).",
+                                )
+                                enhancer_blend = gr.Slider(
+                                    0.0, 1.0, value=0.8, step=0.05, label="Fuerza del enhancer",
+                                    info="Cuánto se mezcla el realce (0 = nada, 1 = máximo).",
+                                )
+                            with gr.Row():
+                                codeformer_fidelity = gr.Slider(
+                                    0.0, 1.0, value=0.7, step=0.05, label="Fidelidad CodeFormer",
+                                    info="Solo CodeFormer: 0 = más detalle/nítido, 1 = más fiel al original.",
+                                )
+
+                        with gr.Accordion("👁️ Ajuste fino: ojos / boca / máscara (opcional)", open=False):
+                            with gr.Row():
+                                eye_preservation = gr.Slider(
+                                    0.0, 1.0, value=0.4, step=0.05, label="👁️ Preservación de ojos",
+                                    info="Realza los ojos para que no queden 'muertos'. Sube si la mirada pierde vida.",
+                                )
+                                mouth_detail = gr.Slider(
+                                    0.0, 1.0, value=0.4, step=0.05, label="👄 Detalle de boca/dientes",
+                                    info="Realza dientes/interior de la boca. Actúa más fuerte con la boca abierta.",
+                                )
+                            with gr.Row():
+                                skin_detail = gr.Slider(
+                                    0.0, 1.0, value=0.35, step=0.05, label="🧴 Textura de piel (anti-plástico)",
+                                    info="Reinyecta la textura/poros del video original sobre la cara swapeada. "
+                                         "Sube si la piel se ve cerosa/plástica; baja si aparece grano de más.",
+                                )
+                            with gr.Row():
+                                mouth_enhancer = gr.Checkbox(
+                                    value=True, label="🦷 Enhancer localizado de boca (CodeFormer, FaceFusion)",
+                                    info="2.º pase de CodeFormer SOLO en la boca abierta (FaceFusion). Dientes más nítidos.",
+                                )
+                                color_match = gr.Checkbox(
+                                    value=False, label="Igualar color al original (iluminación)",
+                                    info="Adapta el tono de la cara nueva al del vídeo. Útil con luces de escenario.",
+                                )
+                            with gr.Row():
+                                mask_mode = gr.Dropdown(
+                                    choices=list(config.MASK_MODE_LABELS.items()), value=config.MASK_HULL,
+                                    label="🎭 Tipo de máscara",
+                                    info="'Contorno' sigue el rostro real (ideal perfiles); 'Rectángulo' es lo más básico.",
+                                )
+                                face_opacity = gr.Slider(
+                                    0.1, 1.0, value=1.0, step=0.05, label="Fuerza del swap (opacidad)",
+                                    info="Intensidad del intercambio. <1 deja ver algo de la cara original.",
+                                )
+                            with gr.Row():
+                                mask_blur = gr.Slider(
+                                    0.0, 0.8, value=0.25, step=0.05, label="Suavizado del borde",
+                                    info="Difumina el borde de la máscara. Súbelo si ves una costura marcada.",
+                                )
+                                mask_padding = gr.Slider(
+                                    0.0, 0.4, value=0.0, step=0.02, label="Recorte interior",
+                                    info="Encoge la máscara hacia dentro para no invadir pelo/frente/orejas.",
+                                )
+
+                        with gr.Accordion("⚙️ FaceFusion avanzado (boca / perfiles)", open=False):
+                            with gr.Row():
+                                use_mouth_pixel_boost = gr.Checkbox(
+                                    value=True, label="Pixel boost localizado de boca (512)",
+                                    info="Reprocesa la boca con CodeFormer a 512 cuando está abierta. Dientes más definidos.",
+                                )
+                                mouth_enhancement_strength = gr.Slider(
+                                    0.0, 2.0, value=1.0, step=0.1, label="Fuerza del enhancer de boca",
+                                    info="Multiplica la fuerza del realce localizado de boca (1.0 = normal, >1 = agresivo).",
+                                )
+                                profile_blending_strength = gr.Slider(
+                                    0.0, 1.0, value=0.5, step=0.05, label="Blending en perfiles",
+                                    info="En caras de lado recupera el borde original (mandíbula/oreja) para evitar deformación.",
+                                )
+
+                        with gr.Accordion("👥 Selección de caras y multi-referencia", open=False):
+                            with gr.Row():
+                                face_selector = gr.Dropdown(
+                                    choices=list(config.FACE_SELECTOR_LABELS.items()),
+                                    value=config.FACE_SELECTOR_ALL, label="¿A qué caras aplicar el swap?",
+                                    info="Todas, la más grande, una persona (por referencia) o por posición.",
+                                )
+                                reference_count = gr.Dropdown(
+                                    choices=config.REFERENCE_COUNT_CHOICES, value=0,
+                                    label="Nº de imágenes de referencia",
+                                    info="Cuántas fotos de origen combinar. 4–6 = más consistencia. No cuesta VRAM extra.",
+                                )
+                            with gr.Row():
+                                reference_index = gr.Number(
+                                    value=0, precision=0, label="Índice de cara (izq→der)",
+                                    info="Para 'por posición'/'por referencia': qué cara del vídeo (0 = la primera).",
+                                )
+                                reference_distance = gr.Slider(
+                                    0.5, 2.0, value=1.2, step=0.05, label="Tolerancia de referencia",
+                                    info="En modo 'por referencia': qué tan parecida debe ser para considerarla la misma persona.",
+                                )
+
+                        with gr.Accordion("🎞️ Temporal (estabilidad / movimiento)", open=False):
+                            with gr.Row():
+                                temporal_smoothing = gr.Checkbox(
+                                    value=True, label="Suavizado temporal",
+                                    info="Reduce el temblor de la cara entre frames.",
+                                )
+                                motion_adaptive = gr.Checkbox(
+                                    value=True, label="Adaptativo al movimiento (sin lag)",
+                                    info="Suaviza el temblor pero reacciona al instante (la boca al cantar no se arrastra).",
+                                )
+                            with gr.Row():
+                                temporal_alpha = gr.Slider(
+                                    0.0, 0.9, value=0.55, step=0.05, label="Intensidad del suavizado",
+                                    info="Más alto = más estable, pero puede dar 'lag' en movimientos rápidos.",
+                                )
+                                two_pass_temporal = gr.Checkbox(
+                                    value=False, label="2 pasadas (máxima estabilidad, usa RAM)",
+                                    info="Analiza un tramo en RAM y estabiliza con ventana centrada (sin lag). Más calidad.",
+                                )
+
+                        with gr.Accordion("🧠 Memoria y rendimiento", open=False):
+                            with gr.Row():
+                                memory_mode = gr.Dropdown(
+                                    choices=list(config.MEMORY_MODE_LABELS.items()),
+                                    value=config.MODE_BALANCED, label="Modo de memoria (VRAM)",
+                                    info="Baja a 'Bajo VRAM' / 'VRAM mínima' si da error de memoria de GPU.",
+                                )
+                                ram_mode = gr.Dropdown(
+                                    choices=list(config.RAM_MODE_LABELS.items()),
+                                    value=config.RAM_BALANCED, label="Uso de RAM (buffers / 2 pasadas)",
+                                    info="'Máximo' aprovecha 32 GB+ (la GPU casi nunca espera).",
+                                )
+                                gpu_mem_limit = gr.Slider(
+                                    0.0, 12.0, value=0.0, step=0.5, label="Límite VRAM/sesión (GB, 0=auto)",
+                                    info="Tope de VRAM por modelo. 0 = automático según el modo.",
+                                )
+                            with gr.Row():
+                                processing_resolution = gr.Dropdown(
+                                    choices=[("Nativa (máxima calidad)", 0), ("1440p", 1440), ("1080p", 1080),
+                                             ("720p (rápido)", 720), ("512p (muy rápido)", 512)],
+                                    value=0, label="Resolución de procesamiento",
+                                    info="Menor = más rápido y menos memoria, pero menos detalle.",
+                                )
+                                force_cpu = gr.Checkbox(
+                                    value=False, label="Forzar CPU (sin GPU)",
+                                    info="Procesa sin GPU. Muy lento; solo para probar la UI.",
+                                )
+                                keep_audio = gr.Checkbox(value=True, label="Conservar audio")
+                                keep_fps = gr.Checkbox(value=True, label="Conservar FPS")
+                                output_quality = gr.Slider(
+                                    12, 30, value=18, step=1, label="Calidad de salida (CRF)",
+                                    info="H.264: menor = mejor calidad y archivo más pesado (18 es buen punto).",
+                                )
+                            mem_info_md = gr.Markdown(
+                                _memory_panel(config.ENGINE_FACEFUSION, config.RAM_BALANCED,
+                                              config.MODE_BALANCED, False),
+                                elem_classes="fuser-soft",
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("#### 🚀 Process")
+                            qc_second_pass = gr.Checkbox(
+                                value=False, label="🔍 2ª pasada: detectar y corregir defectos",
+                                info="Al terminar el vídeo, hace un repaso: detecta frames defectuosos "
+                                     "(cara sin swapear, borrosa, identidad rara o salto) y los CORRIGE con "
+                                     "el MISMO modelo (re-swap con detección agresiva o relleno desde vecinos "
+                                     "buenos). Suma tiempo al final; usa RAM (mejor en clips cortos).",
+                            )
+                            qc_sensitivity = gr.Slider(
+                                0.0, 1.0, value=0.5, step=0.05, label="Sensibilidad de la 2ª pasada",
+                                info="0 = solo defectos claros · 1 = agresivo (marca y corrige más frames).",
+                            )
+                            process_btn = gr.Button("Procesar vídeo completo", variant="primary")
+                            max_swap_btn = gr.Button(
+                                "🚀 MAXIMUM SWAP — máxima fidelidad (lento)",
+                                variant="primary", elem_id="max-swap-btn",
+                            )
+                            gr.Markdown(
+                                "_**MAXIMUM SWAP** ignora los controles y corre el pipeline completo de "
+                                "máxima calidad: swap a **pixel boost 512** multi-referencia, máscaras "
+                                "**xseg_2 + bisenet**, CodeFormer + realce de boca/ojos + textura de piel, "
+                                "**armonización de color/iluminación**, 2 pasadas temporales y **QC** "
+                                "anti-defectos. Tarda varias veces más que el modo normal._",
+                                elem_classes="fuser-soft",
+                            )
+
+                # ===== Más modos: comparar modelos · herramientas =====
+                gr.Markdown("### 🧭 Más modos y herramientas")
+                with gr.Tabs():
+                    with gr.Tab("🔬 Comparar modelos"):
+                        gr.Markdown(
+                            "Probá varios modelos de swap sobre **tu** cara y **tu** video, en los mismos "
+                            "frames clave. El mejor **depende de tu cara** (lo medimos: *ghost_3* suele ganar "
+                            "en identidad, pero a veces *hififace*/*simswap* quedan mejor). Usa las mismas "
+                            "**imágenes fuente** y el mismo **vídeo** de la izquierda.\n\n"
+                            "⏱️ *Cada modelo corre en su propio proceso (por cómo DirectML retiene la VRAM), "
+                            "así que tarda ~10–20 s por modelo.*"
+                        )
+                        cmp_models = gr.CheckboxGroup(
+                            choices=config.FF_SWAPPER_CHOICES,
+                            value=["ghost_3_256", "hififace_unofficial_256", "simswap_256", "inswapper_128"],
+                            label="Modelos a comparar (elegí 2 o más)",
+                        )
+                        with gr.Row():
+                            cmp_frames = gr.Slider(2, 6, value=3, step=1, label="Frames clave por modelo")
+                            cmp_btn = gr.Button("🔬 Comparar en mi material", variant="primary")
+                        cmp_gallery = gr.Gallery(
+                            label="Comparación recortada a la cara (ORIGINAL · modelos)",
+                            columns=5, object_fit="contain", height=440,
+                        )
+                        cmp_status = gr.Markdown("", elem_classes="fuser-soft")
+                    with gr.Tab("🧰 Más herramientas"):
+                        with gr.Row():
+                            with gr.Column():
+                                gr.Markdown("#### ⏭️ Cola de trabajos (mismo set de fuentes)")
+                                video_queue = gr.Files(
+                                    label="Videos cortos a procesar en cola (uno tras otro)",
+                                    file_count="multiple", file_types=["video"], type="filepath",
+                                )
+                                queue_btn = gr.Button("⏭️ Procesar cola", variant="primary")
+                                queue_status = gr.Markdown("", elem_classes="fuser-soft")
+                                queue_results = gr.Files(label="⬇️ Resultados de la cola (descargar)")
+                            with gr.Column():
+                                gr.Markdown("#### ✂️ Cortar video en partes")
+                                split_video = gr.Video(label="Video a cortar")
+                                split_btn = gr.Button("✂️ Cortar en 5 partes iguales", variant="secondary")
+                                split_status = gr.Markdown("", elem_classes="fuser-soft")
+                                split_results = gr.Files(
+                                    label="⬇️ Partes (también quedan en la carpeta chunks/)")
+            with gr.Tab("🧬 Deep Swap — modelo entrenado (.dfm)"):
                 gr.Markdown(
                     "Creá un **modelo `.dfm`** de una persona **todo desde la app**: cargás muchas fotos, "
                     "la app las cura, **entrena en TU GPU** (DeepFaceLab DirectX12, en segundo plano) y al "
