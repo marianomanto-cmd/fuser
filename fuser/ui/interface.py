@@ -269,7 +269,7 @@ def _on_create_model(name, files, progress=gr.Progress()):
     """
     from ..core import faceset
     name = (name or "").strip()
-    nofill = (gr.update(),) * 4
+    nofill = (gr.update(),) * 3
     if not name:
         return ("⚠️ Poné un nombre para el modelo/persona.", None, "", *nofill)
     paths = [f if isinstance(f, str) else getattr(f, "name", None) for f in (files or [])]
@@ -310,8 +310,7 @@ def _on_create_model(name, files, progress=gr.Progress()):
     return (report_md, str(bundle), next_md,
             gr.update(choices=[NO_FACE] + faces),           # face_choice
             gr.update(choices=faces),                       # lib_delete
-            gr.update(choices=faces),                       # dfm_cara (Biblioteca)
-            gr.update(choices=faces, value=name))           # cm_model_cara (esta pestaña)
+            gr.update(choices=faces, value=name))           # cm_model_cara (pestaña 🧬)
 
 
 # --- Entrenador local de .dfm (pestaña 🧬, pasos ②-⑤) ---------------------------
@@ -339,6 +338,11 @@ def _on_trainer_install(progress=gr.Progress()):
 
 
 def _on_trainer_prepare(cara, dst_videos, progress=gr.Progress()):
+    """Genera desde las imágenes TODO el material que DeepFaceLab necesita.
+
+    Videos destino OPCIONALES: sin videos usa el faceset genérico (descarga
+    única ~8.8 GB) y el modelo sale "universal".
+    """
     from ..core import dfm_trainer
     if not cara:
         return "⚠️ Elegí la Cara (creala primero en el paso ①)."
@@ -497,17 +501,24 @@ def _recommendation(mode: str, engine: str) -> str:
             "😮 **Alta expresión** — FaceFusion + realce fuerte de **boca y ojos**. Ideal para "
             "primeros planos muy expresivos."
         ),
+        config.EXPR_MAXIDENTITY: (
+            "🎯 **Máxima Identidad** — para cuando el resultado *sigue pareciéndose a la cara del "
+            "video*: **hififace** (el único modelo que **transfiere la forma de nariz/cráneo** de la "
+            "foto) + máscara de geometría + **empuje anti-video del embedding** + enhancer fiel. "
+            "Consejo: elegí una **Cara guardada** con varias fotos, o subí 4–8 nítidas."
+        ),
+        config.EXPR_MAXID_CHAIN: (
+            "🎯➕ **Máxima Identidad PRO** — la cadena **forma + textura**: primero hififace impone "
+            "la geometría de la foto, después inswapper re-inyecta la identidad de textura (lo mejor "
+            "de ambos, medido). Es ~2× más lento que 🎯. El que más se parece a la foto."
+        ),
         config.EXPR_STANDARD: (
-            "**Uso general** — **InsightFace** es más rápido y suele bastar. Cambia a **FaceFusion** "
-            "si necesitas más calidad en **boca abierta o perfiles**."
+            "**Estándar** — rápido y liviano para probar material. Para el render final usá "
+            "**🎯 Máxima Identidad / PRO** (parecido a la foto) o **🔥 MÁXIMO** (nitidez tope)."
         ),
     }
     base = tips.get(mode, "")
-    if engine == config.ENGINE_FACEFUSION:
-        extra = " ⏳ *FaceFusion prioriza calidad: más lento y más VRAM. Se instala solo la 1ª vez.*"
-    else:
-        extra = " ⚡ *InsightFace: rápido y menos VRAM.*"
-    return f"### 💡 Recomendación\n{base}{extra}"
+    return f"### 💡 Recomendación\n{base}"
 
 
 def _on_engine_change(engine: str, mode: str):
@@ -1077,21 +1088,10 @@ def build_interface() -> gr.Blocks:
                         )
                         lib_delete_btn = gr.Button("🗑️ Borrar", scale=1)
                     lib_status = gr.Markdown("", elem_classes="fuser-soft")
-                with gr.Accordion("🧬 Modelo entrenado (.dfm) — máxima geometría", open=False):
                     gr.Markdown(
-                        "Si entrenaste un **`.dfm`** de esta persona (DeepFaceLab — ver guía "
-                        "`TRAIN_DFM.md`), importalo acá y la Cara swapea con **geometría de cráneo "
-                        "completa** (Deep Swapper), ignorando las fotos. Entrenar es aparte (CUDA/nube); "
-                        "*usarlo* corre en tu GPU. Reiniciá Fuser tras importar.",
-                        elem_classes="fuser-soft",
+                        "🧬 ¿Querés un **modelo entrenado** de una persona (máxima geometría)? "
+                        "Pestaña **«Crear modelo (.dfm)»** abajo.", elem_classes="fuser-soft",
                     )
-                    with gr.Row():
-                        dfm_cara = gr.Dropdown(
-                            choices=face_library.list_faces(), label="Cara destino", scale=3,
-                        )
-                        dfm_file = gr.File(label=".dfm", file_types=[".dfm"], type="filepath", scale=2)
-                    dfm_import_btn = gr.Button("🧬 Asociar .dfm a la Cara", variant="secondary")
-                    dfm_status = gr.Markdown(_dfm_library_status(), elem_classes="fuser-soft")
                 with gr.Group():
                     gr.Markdown("#### 🎬 Target Video")
                     target_video = gr.Video(label="Vídeo objetivo")
@@ -1105,7 +1105,7 @@ def build_interface() -> gr.Blocks:
                              "'Videos musicales' = el mejor preajuste para caras cantando.",
                     )
                     recommendation_md = gr.Markdown(
-                        _recommendation(config.EXPR_STANDARD, config.ENGINE_INSIGHTFACE),
+                        _recommendation(config.EXPR_STANDARD, config.ENGINE_FACEFUSION),
                         elem_classes="fuser-soft",
                     )
 
@@ -1313,7 +1313,7 @@ def build_interface() -> gr.Blocks:
                             info="H.264: menor = mejor calidad y archivo más pesado (18 es buen punto).",
                         )
                     mem_info_md = gr.Markdown(
-                        _memory_panel(config.ENGINE_INSIGHTFACE, config.RAM_BALANCED,
+                        _memory_panel(config.ENGINE_FACEFUSION, config.RAM_BALANCED,
                                       config.MODE_BALANCED, False),
                         elem_classes="fuser-soft",
                     )
@@ -1423,8 +1423,9 @@ def build_interface() -> gr.Blocks:
                         cm_model_cara = gr.Dropdown(
                             choices=face_library.list_faces(), label="Cara / modelo a entrenar")
                         cm_dst_videos = gr.Files(
-                            label="Tus videos destino (donde vas a montar la cara; se usan para enseñarle "
-                                  "las condiciones reales — quedan en tu PC)",
+                            label="Videos destino (OPCIONAL): si los cargás, el modelo aprende las "
+                                  "condiciones de ESOS videos. Si lo dejás vacío, la app usa un set "
+                                  "genérico (descarga única ~8.8 GB) y el modelo sirve para CUALQUIER video.",
                             file_count="multiple", file_types=["video"], type="filepath",
                         )
                         cm_prepare_btn = gr.Button("③ Preparar entrenamiento", variant="secondary")
@@ -1476,27 +1477,22 @@ def build_interface() -> gr.Blocks:
         for _comp in (ram_mode, memory_mode, force_cpu):
             _comp.change(_memory_panel, inputs=_mem_inputs, outputs=mem_info_md)
 
-        # Biblioteca de Caras: guardar / borrar refrescan ambos desplegables.
+        # Biblioteca de Caras: guardar / borrar refrescan todos los desplegables.
         lib_save_btn.click(
             _on_save_face,
             inputs=[lib_name, lib_files],
-            outputs=[face_choice, lib_delete, lib_status, lib_files, dfm_cara],
+            outputs=[face_choice, lib_delete, lib_status, lib_files, cm_model_cara],
         )
         lib_delete_btn.click(
             _on_delete_face,
             inputs=lib_delete,
-            outputs=[face_choice, lib_delete, dfm_cara, lib_status],
-        )
-        dfm_import_btn.click(
-            _on_import_dfm,
-            inputs=[dfm_cara, dfm_file],
-            outputs=[dfm_status, dfm_file],
+            outputs=[face_choice, lib_delete, cm_model_cara, lib_status],
         )
         # Pestaña "🧬 Crear modelo (.dfm)"
         cm_build_btn.click(
             _on_create_model,
             inputs=[cm_name, cm_files],
-            outputs=[cm_report, cm_bundle, cm_next, face_choice, lib_delete, dfm_cara, cm_model_cara],
+            outputs=[cm_report, cm_bundle, cm_next, face_choice, lib_delete, cm_model_cara],
         )
         cm_install_btn.click(_on_trainer_install, inputs=None, outputs=cm_install_status)
         cm_prepare_btn.click(

@@ -42,7 +42,10 @@ def main() -> None:
     on_spaces = bool(os.environ.get("SPACE_ID"))
     host = "0.0.0.0" if (args.listen or on_spaces) else args.host
     log.info("Iniciando %s v%s en http://%s:%d", __app_name__, __version__, host, args.port)
-    demo.launch(server_name=host, server_port=args.port, share=args.share, show_error=True)
+    # Icono de la app (pestaña/ventana). El .ico vive en la raíz del proyecto.
+    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fuser.ico")
+    demo.launch(server_name=host, server_port=args.port, share=args.share, show_error=True,
+                favicon_path=icon if os.path.isfile(icon) else None)
 
 
 if __name__ == "__main__":

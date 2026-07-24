@@ -63,6 +63,13 @@ RTT_URL = os.environ.get(
     "https://huggingface.co/datasets/dimanchkek/Deepfacelive-DFM-Models/resolve/main/Pretrained/RTT%20model%20224%20V2.zip",
 )
 RTT_SHA256 = "0f5f4a4b5bfc48df1fa2c4be8be89dae8fd6a664e4d81eae5eaf4fbb3e84d227"  # 1.842.844.041 bytes
+# Faceset genérico RTM (DST "universal"): solo se baja si el usuario NO aporta
+# videos destino. ~8.8 GB, caras YA alineadas (no se re-extraen).
+RTM_URL = os.environ.get(
+    "FUSER_DFL_RTM_URL",
+    "https://huggingface.co/datasets/dimanchkek/Deepfacelive-DFM-Models/resolve/main/Facesets/RTM%20WF%20Faceset.zip",
+)
+RTM_SIZE = 9_494_305_175  # bytes (verificación de integridad por tamaño)
 
 PROGRESS_RE = re.compile(r"\[?#?(\d{4,9})\]?\[(\d+)ms\]\[([\d.]+)\]\[([\d.]+)\]")
 
@@ -329,13 +336,52 @@ def _patch_model_options(model_dir: Path, **opts) -> bool:
 # ---------------------------------------------------------------------------
 # Preparación del workspace
 # ---------------------------------------------------------------------------
+def _ensure_rtm(progress: Optional[Callable] = None) -> Path:
+    """Garantiza el faceset genérico RTM (DST universal) y devuelve su carpeta.
+
+    Contiene caras YA alineadas (o un faceset.pak, que DFL lee nativo): no se
+    re-extraen. Descarga única de ~8.8 GB compartida entre todos los modelos.
+    """
+    p = _paths()
+    dst = p["root"] / "assets" / "rtm_faceset"
+    def _content(d: Path):
+        if not d.is_dir():
+            return None
+        paks = list(d.rglob("faceset.pak"))
+        if paks:
+            return paks[0].parent
+        jpgs = [x for x in d.rglob("*.jpg")][:1]
+        return jpgs[0].parent if jpgs else None
+    found = _content(dst)
+    if found:
+        return found
+    z = p["downloads"] / "RTM_WF_Faceset.zip"
+    if not (z.exists() and z.stat().st_size == RTM_SIZE):
+        _download(RTM_URL, z, progress, "Faceset genérico (8.8 GB):")
+        if z.stat().st_size != RTM_SIZE:
+            z.unlink(missing_ok=True)
+            raise RuntimeError("La descarga del faceset genérico llegó incompleta. Reintentá.")
+    if progress:
+        progress(0.95, "Desempaquetando el faceset genérico…")
+    dst.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(z) as zf:
+        zf.extractall(dst)
+    found = _content(dst)
+    if not found:
+        raise RuntimeError("El faceset genérico no trae caras reconocibles (revisá el zip).")
+    return found
+
+
 def prepare(name: str, src_dir: Path, dst_videos: List[str],
             progress: Optional[Callable] = None) -> str:
-    """Arma el workspace de entrenamiento para una Cara.
+    """Arma TODO el material que DeepFaceLab necesita, desde las imágenes.
 
-    - SRC: fotos curadas (carpeta de la pestaña ① / faceset_<slug>).
-    - DST: frames de TUS videos (a los que después vas a montar la cara) —
-      100% local, sin descargas. Extrae caras de ambos con el detector de DFL.
+    - SRC: fotos curadas (paso ①) → caras alineadas (extractor S3FD de DFL).
+    - DST: dos caminos —
+        · CON videos destino: frames de tus videos → caras alineadas (el modelo
+          aprende las condiciones reales de ESOS videos; 100% local).
+        · SIN videos (solo imágenes): usa el faceset genérico RTM (descarga
+          automática única de ~8.8 GB) → modelo "universal" para cualquier video.
     - Modelo: semilla del preentrenado RTT (warm-start) + pretrain=OFF forzado.
     """
     from ..core.face_library import _slug
@@ -347,8 +393,6 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
     src_dir = Path(src_dir)
     if not src_dir.is_dir() or not any(src_dir.iterdir()):
         raise ValueError("No encuentro las fotos curadas. Corré primero el paso ① (curar fotos).")
-    if not dst_videos:
-        raise ValueError("Agregá al menos un video destino (los videos donde vas a montar la cara).")
     st = status()
     if not st["build_ready"]:
         raise ValueError("El entrenador no está instalado. Corré el paso ② (instalar).")
@@ -369,31 +413,57 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
             shutil.copyfile(f, data_src / f"{i:05d}{f.suffix.lower()}")
             n += 1
 
-    # 2) DST: frames de los videos del usuario (cap total ~1500 frames)
-    if progress:
-        progress(0.1, "Extrayendo frames de tus videos…")
-    total_frames = 0
-    per_video = max(200, 1500 // max(1, len(dst_videos)))
-    for vi, v in enumerate(dst_videos):
-        try:
-            info = videoutil.probe(v)
-            step = max(1, info.frame_count // per_video)
-            idxs = list(range(0, info.frame_count, step))[:per_video]
-            frames = videoutil.get_frames_at(v, idxs)
-            import cv2
-            for fi, fr in enumerate(frames):
-                if fr is not None:
-                    cv2.imwrite(str(data_dst / f"v{vi:02d}_{fi:05d}.jpg"), fr,
-                                [cv2.IMWRITE_JPEG_QUALITY, 92])
-                    total_frames += 1
-        except Exception as exc:
-            log.warning("No pude extraer frames de %s: %s", v, exc)
-    if total_frames == 0:
-        raise ValueError("No pude extraer frames de los videos destino.")
+    dst_mode = "videos" if dst_videos else "universal"
+    if dst_videos:
+        # 2a) DST: frames de los videos del usuario (cap total ~1500 frames)
+        if progress:
+            progress(0.1, "Extrayendo frames de tus videos…")
+        total_frames = 0
+        per_video = max(200, 1500 // max(1, len(dst_videos)))
+        for vi, v in enumerate(dst_videos):
+            try:
+                info = videoutil.probe(v)
+                step = max(1, info.frame_count // per_video)
+                idxs = list(range(0, info.frame_count, step))[:per_video]
+                frames = videoutil.get_frames_at(v, idxs)
+                import cv2
+                for fi, fr in enumerate(frames):
+                    if fr is not None:
+                        cv2.imwrite(str(data_dst / f"v{vi:02d}_{fi:05d}.jpg"), fr,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 92])
+                        total_frames += 1
+            except Exception as exc:
+                log.warning("No pude extraer frames de %s: %s", v, exc)
+        if total_frames == 0:
+            raise ValueError("No pude extraer frames de los videos destino.")
+    else:
+        # 2b) DST universal: faceset genérico RTM (ya alineado, NO se re-extrae).
+        if progress:
+            progress(0.1, "Sin videos destino: preparando el faceset genérico (única vez ~8.8 GB)…")
+        rtm_dir = _ensure_rtm(progress)
+        aligned = data_dst / "aligned"
+        aligned.mkdir(exist_ok=True)
+        pak = next(iter(rtm_dir.glob("faceset.pak")), None)
+        if pak is not None:
+            # DFL lee faceset.pak nativamente desde aligned/
+            shutil.copyfile(pak, aligned / "faceset.pak")
+        else:
+            # junction (sin copiar 8.8 GB): data_dst/aligned -> carpeta compartida
+            try:
+                aligned.rmdir()
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(aligned), str(rtm_dir)],
+                               capture_output=True, timeout=30, check=True)
+            except Exception:
+                aligned.mkdir(exist_ok=True)
+                for i, f in enumerate(rtm_dir.glob("*.jpg")):
+                    shutil.copyfile(f, aligned / f.name)
 
-    # 3) Extraer caras (WF) de SRC y DST con el detector S3FD de DFL
+    # 3) Extraer caras (WF) del SRC (y del DST solo si vino de videos)
     logf = ws.parent / "prepare.log"
-    for phase_name, in_dir, frac in (("fuente", data_src, 0.3), ("destino", data_dst, 0.6)):
+    phases = [("fuente", data_src, 0.3)]
+    if dst_videos:
+        phases.append(("destino", data_dst, 0.6))
+    for phase_name, in_dir, frac in phases:
         if progress:
             progress(frac, f"Detectando caras ({phase_name}) — puede tardar varios minutos…")
         out_aligned = in_dir / "aligned"
@@ -424,11 +494,15 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
         raise RuntimeError("El preentrenado RTT no está instalado (paso ②).")
     _patch_model_options(model, pretrain=False, batch_size=4, models_opt_on_gpu=False)
 
-    _write_state(slug, phase="prepared", src_faces=len(list((data_src / 'aligned').glob('*.jpg'))),
-                 dst_faces=len(list((data_dst / 'aligned').glob('*.jpg'))),
+    n_dst = len(list((data_dst / "aligned").glob("*.jpg")))
+    dst_txt = (f"{n_dst} caras destino (de tus videos)" if dst_videos
+               else "faceset genérico universal (miles de caras)")
+    _write_state(slug, phase="prepared", dst_mode=dst_mode,
+                 src_faces=len(list((data_src / 'aligned').glob('*.jpg'))),
+                 dst_faces=n_dst,
                  prepared_at=time.strftime("%Y-%m-%d %H:%M:%S"))
     stx = _read_state(slug)
-    return (f"✅ Workspace listo: {stx['src_faces']} caras fuente · {stx['dst_faces']} caras destino · "
+    return (f"✅ Workspace listo: {stx['src_faces']} caras fuente · {dst_txt} · "
             f"modelo sembrado del RTT (pretrain OFF, batch 4). Ya podés entrenar.")
 
 
