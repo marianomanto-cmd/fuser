@@ -300,19 +300,114 @@ def _on_create_model(name, files, progress=gr.Progress()):
                  + f"\n\n**Cara «{name}» creada** (con las mejores fotos, para el swap one-shot y para "
                    "colgarle el `.dfm` después).")
     next_md = (
-        f"### ▶️ Ahora entrená el modelo\n\n"
-        f"1. **Descargá** el paquete de abajo (`{bundle.name}`) — son tus fotos curadas.\n"
-        f"2. Seguí **`CLOUD_TRAIN.md`** (guía paso a paso): entrenás en la **nube** (~US$5-20, medio día) "
-        f"o local. Ese crunch de GPU es el único paso que NO corre dentro de Fuser.\n"
-        f"3. Cuando tengas el `.dfm`, volvé acá al **paso ②** e importalo a «{name}». "
-        f"Esa Cara va a montar con geometría de cráneo completa en cualquier video."
+        f"### ▶️ Siguiente\n\n"
+        f"Seguí con el **paso ②** (instalar el entrenador local, una sola vez) y el **paso ③** "
+        f"(preparar el entrenamiento de «{name}»). Todo desde la app.\n\n"
+        f"*(El paquete de abajo es opcional: solo si algún día preferís entrenar en la nube — "
+        f"ver `CLOUD_TRAIN.md`.)*"
     )
     faces = face_library.list_faces()
     return (report_md, str(bundle), next_md,
             gr.update(choices=[NO_FACE] + faces),           # face_choice
             gr.update(choices=faces),                       # lib_delete
             gr.update(choices=faces),                       # dfm_cara (Biblioteca)
-            gr.update(choices=faces, value=name))           # cm_dfm_cara (esta pestaña)
+            gr.update(choices=faces, value=name))           # cm_model_cara (esta pestaña)
+
+
+# --- Entrenador local de .dfm (pestaña 🧬, pasos ②-⑤) ---------------------------
+def _trainer_status_md() -> str:
+    from ..core import dfm_trainer
+    try:
+        st = dfm_trainer.status()
+    except Exception as exc:
+        return f"⚠️ {exc}"
+    build = "✅ instalado" if st["build_ready"] else "❌ falta"
+    rtt = "✅ listo" if st["rtt_ready"] else "❌ falta"
+    return (f"**Entrenador local** (en `{st['root']}`): build DeepFaceLab DX12 {build} · "
+            f"preentrenado RTT 224 {rtt}.")
+
+
+def _on_trainer_install(progress=gr.Progress()):
+    from ..core import dfm_trainer
+    try:
+        progress(0.01, desc="Instalando el entrenador local (descarga grande, una sola vez)…")
+        msg = dfm_trainer.install(progress=lambda f, m="": progress(min(f, 0.99), desc=m))
+    except Exception as exc:
+        log.exception("Instalación del entrenador falló")
+        return f"⚠️ {exc}\n\n{_trainer_status_md()}"
+    return f"{msg}\n\n{_trainer_status_md()}"
+
+
+def _on_trainer_prepare(cara, dst_videos, progress=gr.Progress()):
+    from ..core import dfm_trainer
+    if not cara:
+        return "⚠️ Elegí la Cara (creala primero en el paso ①)."
+    videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (dst_videos or [])]
+    videos = [v for v in videos if v]
+    src = config.OUTPUTS_DIR / ("faceset_" + face_library._slug(cara))
+    if not src.is_dir():
+        # sin curado previo: usa las fotos guardadas de la Cara
+        src = face_library.face_dir(cara)
+    try:
+        return dfm_trainer.prepare(cara, src, videos,
+                                   progress=lambda f, m="": progress(f, desc=m))
+    except Exception as exc:
+        log.exception("Preparación del entrenamiento falló")
+        return f"⚠️ {exc}"
+
+
+def _on_trainer_start(cara):
+    from ..core import dfm_trainer
+    if not cara:
+        return "⚠️ Elegí la Cara."
+    try:
+        return (dfm_trainer.start(cara)
+                + "\n\n⚠️ Mientras entrena, la GPU está ocupada: no proceses videos a la vez. "
+                  "Un modelo decente lleva **días** de entrenamiento continuo (podés parar y retomar).")
+    except Exception as exc:
+        return f"⚠️ {exc}"
+
+
+def _on_trainer_stop(cara):
+    from ..core import dfm_trainer
+    if not cara:
+        return "⚠️ Elegí la Cara."
+    try:
+        return dfm_trainer.stop(cara)
+    except Exception as exc:
+        return f"⚠️ {exc}"
+
+
+def _on_trainer_refresh(cara):
+    from ..core import dfm_trainer
+    if not cara:
+        return "⚠️ Elegí la Cara."
+    info = dfm_trainer.progress_info(cara)
+    run = "🏃 ENTRENANDO" if info["running"] else "⏸️ detenido"
+    lines = [f"**Estado:** {run} · fase: {info['phase']}"]
+    if info["iter"] is not None:
+        lines.append(f"**Iteración:** {info['iter']:,} · {info['ms']} ms/iter · "
+                     f"pérdida src {info['loss_src']} / dst {info['loss_dst']}")
+        lines.append("*Guía: >100k iters = parecido inicial · 300-600k = bueno · 1M+ = excelente.*")
+    if info["tail"]:
+        lines.append("```\n" + info["tail"][-900:] + "\n```")
+    return "\n\n".join(lines)
+
+
+def _on_trainer_export(cara, progress=gr.Progress()):
+    from ..core import dfm_trainer
+    if not cara:
+        return "⚠️ Elegí la Cara.", gr.update()
+    try:
+        progress(0.1, desc="Exportando el modelo a .dfm (unos minutos)…")
+        dfm_path = dfm_trainer.export(cara)
+        progress(0.8, desc="Asociando el .dfm a la Cara…")
+        msg = face_library.set_dfm(cara, str(dfm_path))
+    except Exception as exc:
+        log.exception("Export del .dfm falló")
+        return f"⚠️ {exc}", gr.update()
+    return (f"{msg}\n\n🎉 Listo: **reiniciá Fuser** y elegí «{cara}» como Cara para montar con el "
+            f"modelo entrenado (geometría completa).\n\n{_dfm_library_status()}"), gr.update(value=str(dfm_path))
 
 
 def _on_save_face(name, files):
@@ -1295,35 +1390,55 @@ def build_interface() -> gr.Blocks:
                             label="⬇️ Partes (también quedan en la carpeta chunks/)")
             with gr.Tab("🧬 Crear modelo (.dfm)"):
                 gr.Markdown(
-                    "Creá un **modelo `.dfm`** de una persona (identidad de máxima fidelidad + "
-                    "**geometría de cráneo completa**). Cargás **muchas fotos**, la app las **cura** y "
-                    "arma el **paquete de entrenamiento**. El crunch de GPU corre en la **nube** (o local) "
-                    "porque es DeepFaceLab y no puede vivir dentro de Fuser sin romper DirectML; después "
-                    "**importás el `.dfm`** acá y esa Cara monta en cualquier video. Guía: **`CLOUD_TRAIN.md`**."
+                    "Creá un **modelo `.dfm`** de una persona **todo desde la app**: cargás muchas fotos, "
+                    "la app las cura, **entrena en TU GPU** (DeepFaceLab DirectX12, en segundo plano) y al "
+                    "final exporta e importa el modelo. La Cara resultante monta con **geometría de cráneo "
+                    "completa** en cualquier video. ⏱️ Realidad: el entrenamiento lleva **días** de GPU "
+                    "(podés parar/retomar y usar la PC; evitá procesar videos mientras entrena)."
                 )
                 with gr.Row():
                     with gr.Column():
-                        gr.Markdown("#### ① Cargar fotos y preparar")
+                        gr.Markdown("#### ① Cargar fotos → curar → crear la Cara")
                         cm_name = gr.Textbox(label="Nombre de la persona/modelo", placeholder="Cara 1")
                         cm_files = gr.Files(
                             label="Muchas fotos de la persona (500-2000 ideal; ángulos/expresiones variados)",
                             file_count="multiple", file_types=["image"], type="filepath",
                         )
-                        cm_build_btn = gr.Button(
-                            "① Curar fotos + crear Cara + armar paquete", variant="primary")
+                        cm_build_btn = gr.Button("① Curar fotos + crear Cara", variant="primary")
                         cm_report = gr.Markdown("", elem_classes="fuser-soft")
-                        cm_bundle = gr.File(label="⬇️ Paquete de entrenamiento (subilo a la nube)")
+                        with gr.Accordion("Paquete para entrenar en la nube (opcional)", open=False):
+                            cm_bundle = gr.File(label="⬇️ Paquete de fotos curadas (ver CLOUD_TRAIN.md)")
                         cm_next = gr.Markdown("", elem_classes="fuser-soft")
-                    with gr.Column():
-                        gr.Markdown("#### ② Importar el .dfm entrenado")
+
+                        gr.Markdown("#### ② Instalar el entrenador local (una sola vez)")
                         gr.Markdown(
-                            "Cuando termines de entrenar (ver `CLOUD_TRAIN.md`), subí el `.dfm`, asocialo "
-                            "a la Cara y **reiniciá Fuser**.", elem_classes="fuser-soft",
+                            "Descarga automática del build **DeepFaceLab DirectX12** + el preentrenado "
+                            "**RTT 224** (~4 GB en total, a `E:\\modelos\\deepfacelab`). Sin pasos manuales.",
+                            elem_classes="fuser-soft",
                         )
-                        cm_dfm_cara = gr.Dropdown(choices=face_library.list_faces(), label="Cara")
-                        cm_dfm_file = gr.File(label=".dfm entrenado", file_types=[".dfm"], type="filepath")
-                        cm_import_btn = gr.Button("② Importar .dfm a la Cara", variant="secondary")
+                        cm_install_btn = gr.Button("② Instalar entrenador local", variant="secondary")
+                        cm_install_status = gr.Markdown(_trainer_status_md(), elem_classes="fuser-soft")
+                    with gr.Column():
+                        gr.Markdown("#### ③ Preparar → ④ Entrenar → ⑤ Exportar")
+                        cm_model_cara = gr.Dropdown(
+                            choices=face_library.list_faces(), label="Cara / modelo a entrenar")
+                        cm_dst_videos = gr.Files(
+                            label="Tus videos destino (donde vas a montar la cara; se usan para enseñarle "
+                                  "las condiciones reales — quedan en tu PC)",
+                            file_count="multiple", file_types=["video"], type="filepath",
+                        )
+                        cm_prepare_btn = gr.Button("③ Preparar entrenamiento", variant="secondary")
+                        with gr.Row():
+                            cm_train_btn = gr.Button("④ ▶️ Entrenar", variant="primary")
+                            cm_stop_btn = gr.Button("⏸️ Parar", variant="secondary")
+                            cm_refresh_btn = gr.Button("🔄 Estado", variant="secondary")
+                        cm_train_status = gr.Markdown("", elem_classes="fuser-soft")
+                        cm_export_btn = gr.Button("⑤ 📦 Exportar .dfm e importarlo a la Cara",
+                                                  variant="primary")
                         cm_import_status = gr.Markdown(_dfm_library_status(), elem_classes="fuser-soft")
+                        with gr.Accordion("Importar un .dfm entrenado afuera (opcional)", open=False):
+                            cm_dfm_file = gr.File(label=".dfm", file_types=[".dfm"], type="filepath")
+                            cm_import_btn = gr.Button("Importar este .dfm a la Cara elegida")
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
@@ -1381,11 +1496,25 @@ def build_interface() -> gr.Blocks:
         cm_build_btn.click(
             _on_create_model,
             inputs=[cm_name, cm_files],
-            outputs=[cm_report, cm_bundle, cm_next, face_choice, lib_delete, dfm_cara, cm_dfm_cara],
+            outputs=[cm_report, cm_bundle, cm_next, face_choice, lib_delete, dfm_cara, cm_model_cara],
+        )
+        cm_install_btn.click(_on_trainer_install, inputs=None, outputs=cm_install_status)
+        cm_prepare_btn.click(
+            _on_trainer_prepare,
+            inputs=[cm_model_cara, cm_dst_videos],
+            outputs=cm_train_status,
+        )
+        cm_train_btn.click(_on_trainer_start, inputs=cm_model_cara, outputs=cm_train_status)
+        cm_stop_btn.click(_on_trainer_stop, inputs=cm_model_cara, outputs=cm_train_status)
+        cm_refresh_btn.click(_on_trainer_refresh, inputs=cm_model_cara, outputs=cm_train_status)
+        cm_export_btn.click(
+            _on_trainer_export,
+            inputs=cm_model_cara,
+            outputs=[cm_import_status, cm_dfm_file],
         )
         cm_import_btn.click(
             _on_import_dfm,
-            inputs=[cm_dfm_cara, cm_dfm_file],
+            inputs=[cm_model_cara, cm_dfm_file],
             outputs=[cm_import_status, cm_dfm_file],
         )
 
