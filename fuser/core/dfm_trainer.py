@@ -50,16 +50,19 @@ def dfl_root() -> Path:
     return config.PROJECT_ROOT / "dfl"
 
 
-# URL del build DirectX12 y del preentrenado RTT. Se rellenan/ajustan según la
-# verificación (ver research); si cambian de mirror, actualizá SOLO estas líneas.
+# URLs VERIFICADAS (2026-07, mirror HF dimanchkek/Deepfacelive-DFM-Models, GPL-3.0;
+# HEAD 200, CDN con soporte Range para reanudar). Si cambian de mirror, actualizá
+# SOLO estas líneas (o las env vars).
 BUILD_URL = os.environ.get(
     "FUSER_DFL_BUILD_URL",
-    "https://github.com/iperov/DeepFaceLab/releases/download/DeepFaceLab_DirectX12_build_05_04_2022/DeepFaceLab_DirectX12_build_05_04_2022.exe",
+    "https://huggingface.co/datasets/dimanchkek/Deepfacelive-DFM-Models/resolve/main/Pre-builds/DeepFaceLab_DirectX12_build_05_04_2022.exe",
 )
+BUILD_SHA256 = "dd666c196e5053a57c6aad08caa870a5e85207c12dd4ed95f5b5718235febeda"  # 2.783.049.668 bytes
 RTT_URL = os.environ.get(
     "FUSER_DFL_RTT_URL",
     "https://huggingface.co/datasets/dimanchkek/Deepfacelive-DFM-Models/resolve/main/Pretrained/RTT%20model%20224%20V2.zip",
 )
+RTT_SHA256 = "0f5f4a4b5bfc48df1fa2c4be8be89dae8fd6a664e4d81eae5eaf4fbb3e84d227"  # 1.842.844.041 bytes
 
 PROGRESS_RE = re.compile(r"\[?#?(\d{4,9})\]?\[(\d+)ms\]\[([\d.]+)\]\[([\d.]+)\]")
 
@@ -173,30 +176,69 @@ def _download(url: str, dst: Path, progress: Optional[Callable] = None, label: s
     return dst
 
 
+def _sha256(path: Path, progress: Optional[Callable] = None, label: str = "") -> str:
+    import hashlib
+    h = hashlib.sha256()
+    total = path.stat().st_size
+    done = 0
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024 * 4)
+            if not chunk:
+                break
+            h.update(chunk)
+            done += len(chunk)
+            if progress and total:
+                progress(done / total, f"{label} verificando integridad…")
+    return h.hexdigest()
+
+
+def _fetch_verified(url: str, dst: Path, sha256: str, progress, label: str) -> Path:
+    """Descarga (con reanudación) y verifica SHA256; borra y reintenta una vez si falla."""
+    for attempt in (1, 2):
+        if not dst.exists():
+            _download(url, dst, progress, label)
+        digest = _sha256(dst, progress, label)
+        if digest == sha256:
+            return dst
+        log.warning("%s: SHA256 no coincide (intento %d): %s", dst.name, attempt, digest)
+        dst.unlink(missing_ok=True)
+    raise RuntimeError(f"{dst.name}: la descarga llegó corrupta dos veces (SHA256 no coincide). "
+                       f"Reintentá más tarde.")
+
+
+def _seven_zip() -> Optional[Path]:
+    for cand in (Path("C:/Program Files/7-Zip/7z.exe"),
+                 Path("C:/Program Files (x86)/7-Zip/7z.exe")):
+        if cand.is_file():
+            return cand
+    return None
+
+
 def install(progress: Optional[Callable] = None) -> str:
     """Instala el entrenador local: build DX12 + preentrenado RTT (una vez)."""
     p = _paths()
     msgs = []
     if not status()["build_ready"]:
         exe = p["downloads"] / Path(BUILD_URL).name
-        if not exe.exists():
-            _download(BUILD_URL, exe, progress, "Build DeepFaceLab DX12:")
+        _fetch_verified(BUILD_URL, exe, BUILD_SHA256, progress, "Build DeepFaceLab DX12:")
         if progress:
-            progress(0.5, "Desempaquetando el build…")
+            progress(0.5, "Desempaquetando el build (~2.6 GB)…")
         p["build"].mkdir(parents=True, exist_ok=True)
-        if exe.suffix.lower() == ".zip":
-            with zipfile.ZipFile(exe) as z:
-                z.extractall(p["build"])
+        # el .exe es un 7-Zip SFX (verificado): extrae headless con -y -o<dir>;
+        # si hay 7-Zip local, es aún más robusto.
+        sz = _seven_zip()
+        if sz is not None:
+            r = subprocess.run([str(sz), "x", str(exe), f"-o{p['build']}", "-y"],
+                               capture_output=True, timeout=3600)
         else:
-            # autoextraíble 7z SFX: -y silencioso, -o<dir> destino
-            r = subprocess.run([str(exe), "-y", f"-o{p['build']}"], capture_output=True, timeout=1800)
-            if r.returncode != 0:
-                raise RuntimeError(f"No pude desempaquetar el build (rc={r.returncode}).")
+            r = subprocess.run([str(exe), "-y", f"-o{p['build']}"], capture_output=True, timeout=3600)
+        if r.returncode != 0:
+            raise RuntimeError(f"No pude desempaquetar el build (rc={r.returncode}).")
         msgs.append("build instalado")
     if not status()["rtt_ready"]:
         z = p["downloads"] / "RTT_model_224_V2.zip"
-        if not z.exists():
-            _download(RTT_URL, z, progress, "Preentrenado RTT 224:")
+        _fetch_verified(RTT_URL, z, RTT_SHA256, progress, "Preentrenado RTT 224:")
         if progress:
             progress(0.9, "Desempaquetando el preentrenado…")
         p["rtt"].mkdir(parents=True, exist_ok=True)
@@ -220,9 +262,16 @@ def _run_dfl(args: List[str], log_file: Path, cwd: Optional[Path] = None,
     if not (py and main):
         raise RuntimeError("El entrenador no está instalado (falta build). Corré la instalación.")
     env = dict(os.environ)
-    internal = str(main.parent.parent)
-    # réplica del setenv.bat del build: rutas del python embebido
+    internal = main.parent.parent  # _internal
+    # réplica del setenv.bat del build (INTERNAL/DFL_ROOT/PATH del python embebido
+    # + ffmpeg incluido). Sin esto algunos módulos no resuelven rutas/DLLs.
+    env["INTERNAL"] = str(internal)
+    env["DFL_ROOT"] = str(main.parent)
     env["PYTHONPATH"] = str(main.parent)
+    env["PATH"] = os.pathsep.join([
+        str(py.parent), str(py.parent / "Scripts"),
+        str(internal / "ffmpeg"), env.get("PATH", ""),
+    ])
     env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     cmd = [str(py), str(main)] + args
     log_file.parent.mkdir(parents=True, exist_ok=True)
