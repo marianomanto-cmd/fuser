@@ -26,6 +26,39 @@ usarla en tu máquina.
 
 ---
 
+## 🗂️ La app: dos pestañas
+
+### 🎭 Face Swap (one-shot)
+El flujo clásico: elegís una **Cara guardada** (Biblioteca) o subís fotos, cargás el video y
+procesás con un **preset** (🎯 Máxima Identidad, 🎯➕ PRO forma+textura, 🔥 MÁXIMO, 🎤 Musical…).
+Motor FaceFusion vendorizado (inswapper/hififace/ghost…) + enhancer + máscaras finas + 2 pasadas
+temporales + QC. Todo corre por ONNX Runtime (DirectML en esta máquina; CUDA donde haya).
+
+### 🧬 Deep Swap (modelo entrenado `.dfm`) — identidad de máxima fidelidad
+Crea un **modelo entrenado por-persona** (DeepFaceLive `.dfm`, geometría de cráneo completa) con
+**un botón**, y montalo en cualquier video desde la misma pestaña:
+
+1. **① Crear modelo**: cargá **videos de la persona** (ideal ~60 clips de ~6 s, movimientos y
+   ángulos variados; fotos opcionales). La app instala sola el entrenador (DeepFaceLab DirectX12 +
+   preentrenado RTT + set genérico, descargas verificadas y reanudables), **cura** el material
+   (dedup, nitidez, consistencia de identidad), **sintetiza** dataset extra solo si falta material
+   (con el motor 🎯➕; lo real siempre predomina), y **entrena en tu GPU en segundo plano**
+   (sobrevive al cierre de la app; pausar/retomar cuando quieras).
+2. **🤖 Autopiloto**: al llegar al objetivo de iteraciones exporta el `.dfm` y lo registra solo
+   (también podés «⏹️ Terminar y exportar YA»).
+3. **② Montar**: elegí el modelo del desplegable, subí el video, elegí el preset de calidad y listo.
+
+⏱️ Realidad: un modelo bueno lleva **días** de GPU (con el preentrenado, mucho menos que de cero).
+Guías: [TRAIN_DFM.md](TRAIN_DFM.md) (conceptos) · [CLOUD_TRAIN.md](CLOUD_TRAIN.md) (alternativa en
+la nube). El entrenador vive en su propia carpeta con su Python embebido — jamás toca el venv de
+la app.
+
+**Principio de memoria en todo**: los 40 GB de RAM asisten a los 8 GB de VRAM en cada etapa —
+buffers y 2 pasadas por tramos en el swap, optimizer del entrenamiento en RAM (batch más alto en
+VRAM), arena de VRAM grande (`MODE_MAX_QUALITY`) en síntesis y montaje.
+
+---
+
 ## 📑 Tabla de contenidos
 1. [Investigación: ¿qué backend y por qué?](#-investigación-qué-backend-y-por-qué)
 2. [🔀 Dos motores de face swap](#-dos-motores-de-face-swap-elige-en-la-ui)

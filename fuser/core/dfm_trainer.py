@@ -649,7 +649,11 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
             seeded += 1
     if seeded == 0:
         raise RuntimeError("El preentrenado RTT no está instalado (paso ②).")
-    _patch_model_options(model, pretrain=False, batch_size=4, models_opt_on_gpu=False)
+    # MAXIMIZAR VRAM+RAM (principio de la app): optimizer a RAM (40 GB) libera
+    # VRAM → batch más alto = más VRAM útil por iteración. Env-tuneable; el
+    # harness de prueba valida el valor en esta GPU (8GB DX12, res 224).
+    batch = int(os.environ.get("FUSER_DFM_BATCH", "8"))
+    _patch_model_options(model, pretrain=False, batch_size=batch, models_opt_on_gpu=False)
 
     n_dst = len(list((data_dst / "aligned").glob("*.jpg")))
     dst_txt = (f"{n_dst} caras destino (de tus videos)" if dst_videos

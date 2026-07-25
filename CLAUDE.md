@@ -6,10 +6,34 @@ Lee también `INSTALL.md` (instalación) y `README.md` (uso y diseño).
 ## Qué es
 **Fuser**: app web local (Gradio) cuya **única** función es **face swap de vídeo** de alta calidad,
 optimizada para **8 GB de VRAM NVIDIA + 40 GB de RAM** y afinada para **caras cantando en videos
-musicales** (múltiples ángulos, boca abierta, perfiles, mucho movimiento).
+musicales**. Dos pestañas:
+- **🎭 Face Swap** (one-shot): Cara guardada/fotos + video + preset (🎯 Máxima Identidad, 🎯➕ PRO,
+  🔥 MÁXIMO…). Motor FaceFusion vendorizado.
+- **🧬 Deep Swap**: crea un **modelo `.dfm` por-persona** con un botón (videos de la persona →
+  curado → síntesis si falta material → **entrenamiento local** DeepFaceLab DirectX12 en segundo
+  plano → autopiloto exporta/registra) y lo monta en videos desde la misma pestaña.
+  Código: `fuser/core/dfm_trainer.py`, `faceset.py`, `faceset_synth.py`, `face_library.py`.
 
-## Hardware objetivo
-- GPU NVIDIA 8 GB VRAM (CUDA), 40 GB RAM. Sin GPU funciona en CPU (lento, solo para ver la UI).
+## Hardware objetivo (y VERDADES de esta máquina — leer antes de tocar nada)
+- GPU NVIDIA 8 GB VRAM, 40 GB RAM. En ESTA máquina: **DirectML** (onnxruntime-directml 1.24.4;
+  1.17.3 diverge aquí). El build CUDA de DeepFaceLab CONGELA en la 4060 Ti → se usa el build
+  **DirectX12** (entrena ~3s/iter, res 224).
+- **LEY: un modelo ONNX por subproceso** — DirectML retiene la VRAM entre modelos en un mismo
+  proceso (colgado silencioso). Vale para benchmarks Y para la síntesis (`faceset_synth._run_pass`
+  spawnea `python -m fuser.core.faceset_synth passN`).
+- **Principio de memoria**: la RAM asiste a la VRAM en TODO — buffers/2 pasadas en swap,
+  optimizer del entrenamiento en RAM (batch alto, `FUSER_DFM_BATCH`), `MODE_MAX_QUALITY` en
+  síntesis y montaje.
+- Los modelos de FaceFusion viven en `E:\modelos\facefusion` (junction desde
+  `vendor/facefusion/.assets/models`); el entrenador en `E:\modelos\deepfacelab`. Al borrar
+  recursivo: **desmontar junctions primero** (protege E:).
+- `Settings.output_quality` ES el CRF de x264 (menor = mejor). hyperswap está roto en DML aquí.
+
+## Reglas con el usuario (INQUEBRANTABLES)
+- **JAMÁS abrir/leer/tocar los inputs u outputs del usuario** (sus fotos/videos/caras guardadas).
+- Todas las pruebas con **material de stock** (Pexels/Mixkit) en `agent_tests/`, con
+  `FUSER_FACES_DIR`/`FUSER_OUTPUT_DIR` apuntando a dirs de test aislados.
+- No parar/relanzar la app sin permiso.
 
 ## Comandos
 ```bash
