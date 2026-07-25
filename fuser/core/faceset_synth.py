@@ -29,13 +29,16 @@ from ..utils.logging import get_logger
 
 log = get_logger(__name__)
 
-# Umbral: con menos de estas fotos reales curadas se activa la síntesis.
+# Umbral: con menos de estas caras reales curadas se activa la síntesis.
+# (Con videos de la PERSONA provistos, lo normal es superar esto de sobra y
+# entrenar 100% con material real — la síntesis es solo relleno de emergencia.)
 SYNTH_THRESHOLD = 150
 # Cuántos crops sintéticos generar (env-tunable). Más = más cobertura, más horas.
 SYNTH_TARGET = int(__import__("os").environ.get("FUSER_SYNTH_TARGET", "1000"))
-# Peso de lo real en el dataset final (fracción aproximada, vía duplicación).
-REAL_FRACTION = 0.15
-MAX_DUP = 50
+# Peso de lo REAL cuando la síntesis se activa: PREDOMINA el material original
+# (≈50/50 por duplicación; el resto de las veces el dataset es 100% real).
+REAL_FRACTION = 0.5
+MAX_DUP = 30
 
 
 def _settings_pass1() -> config.Settings:
@@ -65,21 +68,31 @@ def _settings_pass2() -> config.Settings:
     return s
 
 
-def _run_pass(settings, real_images, in_files: List[Path], out_dir: Path,
-              progress: Optional[Callable], frac0: float, frac1: float, label: str) -> int:
-    """Corre una pasada de swap sobre una lista de crops. Devuelve nº generados."""
+def _run_pass_worker(pass_id: str, real_dir: Path, manifest: Path, out_dir: Path) -> int:
+    """Cuerpo de UNA pasada (corre en su PROPIO proceso — ver _run_pass).
+
+    Regla dura medida en esta máquina: DirectML retiene la VRAM entre modelos
+    dentro de un mismo proceso; encadenar hififace→inswapper in-process ahoga la
+    2ª carga (colgado sin error). Por eso cada pasada es un subproceso limpio.
+    """
     import cv2
     from .pipeline import SwapPipeline
+
+    settings = _settings_pass1() if pass_id == "pass1" else _settings_pass2()
+    real_paths = [p for p in sorted(Path(real_dir).iterdir())
+                  if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp")]
+    real_images = [im for im in (cv2.imread(str(p)) for p in real_paths) if im is not None]
+    in_files = [Path(l) for l in Path(manifest).read_text(encoding="utf-8").splitlines() if l.strip()]
 
     pipe = SwapPipeline(settings)
     pipe.load_models()
     pipe.prepare_source(real_images)
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     done = 0
-    total = max(1, len(in_files))
     for i, f in enumerate(in_files):
-        if progress and i % 20 == 0:
-            progress(frac0 + (frac1 - frac0) * i / total, f"{label} {i}/{total}…")
+        if i % 10 == 0:
+            print(f"PASSPROG {i}/{len(in_files)}", flush=True)
         img = cv2.imread(str(f))
         if img is None:
             continue
@@ -90,17 +103,58 @@ def _run_pass(settings, real_images, in_files: List[Path], out_dir: Path,
             continue
         if out is None:
             continue
+        # Si FF no detectó cara, process_frame devuelve el frame INTACTO: dejarlo
+        # pasar metería al DONANTE (otra persona) en el dataset de entrenamiento.
+        import numpy as _np
+        if out.shape == img.shape and float(_np.mean(_np.abs(
+                out.astype(_np.int16) - img.astype(_np.int16)))) < 1.0:
+            continue
         # PNG SIN PÉRDIDA: los intermedios no deben acumular recompresión JPEG
         # (síntesis en 2 pasadas + extract de DFL = 3 generaciones si fuera JPG).
         cv2.imwrite(str(out_dir / (f.stem + ".png")), out)
         done += 1
-    # liberar el modelo/pool antes de la siguiente pasada (misma process; DirectML)
-    try:
-        pipe.engine.unload()
-    except Exception:
-        pass
-    del pipe
-    gc.collect()
+    print(f"PASSDONE {done}", flush=True)
+    return done
+
+
+def _run_pass(pass_id: str, real_dir: Path, in_files: List[Path], out_dir: Path,
+              progress: Optional[Callable], frac0: float, frac1: float, label: str,
+              timeout: int = 4 * 3600) -> int:
+    """Lanza una pasada en SUBPROCESO propio y monitorea el avance por archivos."""
+    import subprocess
+    import sys
+    import time as _t
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = out_dir.parent / (out_dir.name + "_manifest.txt")
+    manifest.write_text("\n".join(str(f) for f in in_files), encoding="utf-8")
+    env = dict(__import__("os").environ)
+    env["PYTHONPATH"] = str(config.PROJECT_ROOT)
+    env.setdefault("PYTHONIOENCODING", "utf-8"); env.setdefault("PYTHONUTF8", "1")
+    logf = open(out_dir.parent / (out_dir.name + "_worker.log"), "ab")
+    # como MÓDULO (-m): ejecutar el archivo directo rompería los imports relativos
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "fuser.core.faceset_synth", pass_id,
+         str(real_dir), str(manifest), str(out_dir)],
+        cwd=str(config.PROJECT_ROOT), env=env,
+        stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+    )
+    total = max(1, len(in_files))
+    t0 = _t.time()
+    while proc.poll() is None:
+        if _t.time() - t0 > timeout:
+            proc.kill()
+            raise RuntimeError(f"síntesis {pass_id}: timeout tras {timeout}s")
+        n = len(list(out_dir.glob("*.png")))
+        if progress:
+            progress(frac0 + (frac1 - frac0) * n / total, f"{label} {n}/{total}…")
+        _t.sleep(10)
+    logf.close()
+    done = len(list(out_dir.glob("*.png")))
+    if proc.returncode != 0 and done == 0:
+        raise RuntimeError(f"síntesis {pass_id} falló (rc={proc.returncode}); "
+                           f"log: {out_dir.parent / (out_dir.name + '_worker.log')}")
     return done
 
 
@@ -112,12 +166,8 @@ def synthesize(real_dir: Path, donor_files: List[Path], out_dir: Path,
     ``real_dir``: fotos reales curadas. ``donor_files``: crops de caras donantes
     (alineados; poses/luces variadas). Devuelve {'synthetic': n, 'donors_used': m}.
     """
-    import cv2
-
-    real_paths = [p for p in sorted(Path(real_dir).iterdir())
-                  if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp")]
-    real_images = [im for im in (cv2.imread(str(p)) for p in real_paths) if im is not None]
-    if not real_images:
+    real_dir = Path(real_dir)
+    if not any(real_dir.iterdir()):
         raise ValueError("No pude leer las fotos reales para la síntesis.")
 
     donors = list(donor_files)
@@ -127,12 +177,12 @@ def synthesize(real_dir: Path, donor_files: List[Path], out_dir: Path,
         raise ValueError("No hay caras donantes para sintetizar (faceset genérico/videos).")
 
     tmp = out_dir.parent / (out_dir.name + "_p1")
-    n1 = _run_pass(_settings_pass1(), real_images, donors, tmp,
+    n1 = _run_pass("pass1", real_dir, donors, tmp,
                    progress, 0.0, 0.55, "Síntesis 1/2 · forma (hififace)")
     if n1 == 0:
         raise RuntimeError("La síntesis no produjo caras en la pasada de forma.")
     mid_files = sorted(tmp.glob("*.png"))
-    n2 = _run_pass(_settings_pass2(), real_images, mid_files, out_dir,
+    n2 = _run_pass("pass2", real_dir, mid_files, out_dir,
                    progress, 0.55, 1.0, "Síntesis 2/2 · textura (inswapper)")
     # limpieza de la etapa intermedia
     for f in mid_files:
@@ -156,3 +206,9 @@ def real_duplication(n_real: int, n_synth: int) -> int:
         return 0
     dup = int(round((REAL_FRACTION * n_synth) / max(1, n_real * (1 - REAL_FRACTION))))
     return max(1, min(MAX_DUP, dup))
+
+
+if __name__ == "__main__":  # worker de una pasada (subproceso; ver _run_pass)
+    import sys as _sys
+    _sys.exit(0 if _run_pass_worker(_sys.argv[1], Path(_sys.argv[2]),
+                                    Path(_sys.argv[3]), Path(_sys.argv[4])) >= 0 else 1)

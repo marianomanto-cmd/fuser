@@ -121,7 +121,24 @@ def curate(
         centroid = np.mean(np.array(kept_embs), axis=0)
         centroid /= (np.linalg.norm(centroid) + 1e-8)
         cos = np.dot(np.array(kept_embs), centroid)
-        outliers = [kept[i].name for i in range(len(kept)) if cos[i] < 0.30]
+        outlier_idx = [i for i in range(len(kept)) if cos[i] < 0.30]
+        outliers = [kept[i].name for i in outlier_idx]
+        if outlier_idx:
+            # DESCARTAR las de otra persona (no solo avisar): en el flujo de un
+            # botón nadie las quita a mano y contaminarían el entrenamiento.
+            keep_mask = [i not in set(outlier_idx) for i in range(len(kept))]
+            kept = [k for k, m in zip(kept, keep_mask) if m]
+            kept_embs = [e for e, m in zip(kept_embs, keep_mask) if m]
+            kept_yaw = [y for y, m in zip(kept_yaw, keep_mask) if m]
+            drop["otra_persona"] = len(outlier_idx)
+            report["dropped"] = dict(drop)
+            report["kept"] = len(kept)
+            report["kept_paths"] = [str(p) for p in kept]
+            yy = np.array(kept_yaw) if kept_yaw else np.zeros(0)
+            left = int((yy > 0.15).sum()); right = int((yy < -0.15).sum())
+            report["coverage"] = {"front": max(0, len(yy) - left - right),
+                                  "left": left, "right": right}
+            cos = np.dot(np.array(kept_embs), centroid) if kept_embs else np.zeros(1)
         report["identity"] = {"min_cos": round(float(cos.min()), 2),
                               "mean_cos": round(float(cos.mean()), 2),
                               "outliers": outliers}

@@ -114,6 +114,12 @@ def _state_file(slug: str) -> Path:
     return _paths()["workspaces"] / slug / "state.json"
 
 
+import threading
+
+_STATE_LOCK = threading.Lock()   # autopiloto (hilo) vs handlers de la UI
+_EXPORT_LOCK = threading.Lock()  # nunca dos exportdfm sobre el mismo model-dir
+
+
 def _read_state(slug: str) -> dict:
     try:
         return json.loads(_state_file(slug).read_text(encoding="utf-8"))
@@ -122,10 +128,14 @@ def _read_state(slug: str) -> dict:
 
 
 def _write_state(slug: str, **kw) -> None:
-    st = _read_state(slug)
-    st.update(kw)
-    _state_file(slug).parent.mkdir(parents=True, exist_ok=True)
-    _state_file(slug).write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    with _STATE_LOCK:
+        st = _read_state(slug)
+        st.update(kw)
+        f = _state_file(slug)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, f)  # escritura atómica
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +152,9 @@ def rtm_ready() -> bool:
 def status() -> dict:
     p = _paths()
     py = _find_python(p)
-    # rglob: el zip del RTT extrae en subcarpeta ("RTT model 224 V2/…")
-    rtt_ok = next(p["rtt"].rglob("*.npy"), None) is not None if p["rtt"].is_dir() else False
+    # marker .complete = extracción entera; legado: algún .npy (instalaciones previas)
+    rtt_ok = ((p["rtt"] / ".complete").is_file() or
+              next(p["rtt"].rglob("*.npy"), None) is not None) if p["rtt"].is_dir() else False
     return {
         "root": str(p["root"]),
         "build_ready": bool(py and p["main"].parent.is_dir() and _find_main(p)),
@@ -192,6 +203,12 @@ def _download(url: str, dst: Path, progress: Optional[Callable] = None, label: s
         got_bytes = False
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
+                if have and getattr(r, "status", 206) == 200:
+                    # el servidor IGNORÓ el Range y manda el cuerpo completo:
+                    # appendear corrompería el .part → reiniciar desde cero.
+                    log.warning("%s: el servidor no soporta Range; reiniciando descarga.", dst.name)
+                    part.unlink(missing_ok=True)
+                    continue
                 cl = int(r.headers.get("Content-Length") or 0)
                 total_known = have + cl if cl else total_known
                 done = have
@@ -216,20 +233,28 @@ def _download(url: str, dst: Path, progress: Optional[Callable] = None, label: s
         except urllib.error.HTTPError as exc:
             if exc.code == 416:  # Range fuera de rango = ya estaba completa
                 break
+            if exc.code in (403, 404, 410):
+                # error PERMANENTE (URL rota/mirror caído): reintentar no ayuda.
+                raise RuntimeError(f"{dst.name}: HTTP {exc.code} — la URL parece rota; "
+                                   f"actualizá el mirror (env FUSER_DFL_*_URL).")
             log.warning("%s: HTTP %s; reintento en %ds…", dst.name, exc.code, retry_wait)
-        except Exception as exc:  # red caída, timeout, DNS…
-            log.warning("%s: conexión interrumpida (%s); reintento en %ds…",
-                        dst.name, str(exc)[:80], retry_wait)
-            if progress:
-                progress(min(0.99, (part.stat().st_size if part.exists() else 0) /
-                             max(1, total_known or 1)),
-                         f"{label} conexión caída — reintentando solo…")
+        except OSError as exc:
+            if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+                log.warning("%s: conexión interrumpida (%s); reintento en %ds…",
+                            dst.name, str(exc)[:80], retry_wait)
+                if progress:
+                    progress(min(0.99, (part.stat().st_size if part.exists() else 0) /
+                                 max(1, total_known or 1)),
+                             f"{label} conexión caída — reintentando solo…")
+            else:
+                # error LOCAL (disco lleno/permisos): fallar rápido, no loopear.
+                raise
         stalls = 0 if got_bytes else stalls + 1
         if stalls >= max_stalls:
             raise RuntimeError(f"{dst.name}: {max_stalls} reintentos sin progreso; "
                                f"revisá la conexión y volvé a intentar (lo bajado se conserva).")
         time.sleep(retry_wait)
-    part.rename(dst)
+    os.replace(part, dst)  # atómico y pisa dst si quedó de una corrida anterior
     return dst
 
 
@@ -298,9 +323,15 @@ def install(progress: Optional[Callable] = None) -> str:
         _fetch_verified(RTT_URL, z, RTT_SHA256, progress, "Preentrenado RTT 224:")
         if progress:
             progress(0.9, "Desempaquetando el preentrenado…")
-        p["rtt"].mkdir(parents=True, exist_ok=True)
+        # extraer a staging y renombrar: un crash a mitad no deja un RTT "a medias"
+        staging = p["rtt"].with_name(p["rtt"].name + "_staging")
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(z) as zf:
-            zf.extractall(p["rtt"])
+            zf.extractall(staging)
+        shutil.rmtree(p["rtt"], ignore_errors=True)
+        os.replace(staging, p["rtt"])
+        (p["rtt"] / ".complete").write_text("ok", encoding="utf-8")
         msgs.append("preentrenado RTT listo")
     st = status()
     if not st["build_ready"]:
@@ -451,6 +482,31 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
     data_src = ws / "data_src"
     data_dst = ws / "data_dst"
     model = ws / "model"
+
+    def _is_junction(p: Path) -> bool:
+        import stat as _stat
+        try:
+            return bool(os.stat(p, follow_symlinks=False).st_file_attributes
+                        & _stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except OSError:
+            return False
+
+    def _rm_dir_safe(p: Path) -> None:
+        """Borra un dir del workspace SIN atravesar junctions (protege el RTM en E:)."""
+        if not p.exists():
+            return
+        aligned = p / "aligned"
+        if aligned.exists() and _is_junction(aligned):
+            os.rmdir(aligned)  # desmonta el junction; el destino queda intacto
+        if _is_junction(p):
+            os.rmdir(p)
+            return
+        shutil.rmtree(p, ignore_errors=True)
+
+    # LIMPIEZA de corridas anteriores: sin esto se mezclan datasets viejos y
+    # nuevos (y el conteo de éxito del extract se satisface con jpgs rancios).
+    for d in (data_src, data_dst, ws / "synth", ws / "synth_p1"):
+        _rm_dir_safe(d)
     for d in (data_src, data_dst, model):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -471,7 +527,11 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
             "--max-faces-from-image", "1", "--image-size", "512", "--jpeg-quality", "100",
             "--no-output-debug",
         ], logf, stdin_text="\n" * 8)
-        rc = proc.wait(timeout=timeout)
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()  # sin esto queda un DFL zombie ocupando la GPU
+            raise RuntimeError(f"Extracción ({phase_name}) superó {timeout}s; proceso matado.")
         n_faces = len(list(out_aligned.glob("*.jpg")))
         if rc != 0 or n_faces == 0:
             raise RuntimeError(
@@ -520,13 +580,37 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
             subprocess.run(["cmd", "/c", "mklink", "/J", str(aligned), str(rtm_dir)],
                            capture_output=True, timeout=30, check=True)
         except Exception:
+            aligned.mkdir(exist_ok=True)
             pak = next(iter(rtm_dir.glob("faceset.pak")), None)
             if pak is not None:
                 shutil.copyfile(pak, aligned / "faceset.pak")
+        # VALIDACIÓN: el DST tiene que existir de verdad (pak o miles de jpgs);
+        # sin esto un fallo silencioso entrenaría contra un destino vacío.
+        has_dst = (aligned / "faceset.pak").is_file() or \
+            next(iter(aligned.glob("*.jpg")), None) is not None
+        if not has_dst:
+            raise RuntimeError("No pude montar el faceset genérico como destino "
+                               "(ni junction ni faceset.pak). Revisá E: y permisos.")
 
-    # ---- 2) SRC: con pocas fotos reales, SINTETIZAR el faceset ------------------
+    # ---- 2) SRC: con pocas caras reales, SINTETIZAR el faceset ------------------
     from . import faceset_synth
     synth_info = None
+    if n_real < faceset_synth.SYNTH_THRESHOLD and not donor_files and not dst_videos:
+        # RTM viene SOLO como faceset.pak (verificado): para donar caras a la
+        # síntesis hay que desempaquetarlo UNA vez con el util de DFL.
+        rtm_dir = _ensure_rtm(progress)
+        pak = next(iter(rtm_dir.glob("faceset.pak")), None)
+        if pak is not None:
+            if progress:
+                progress(0.15, "Desempaquetando el faceset genérico para la síntesis (una vez)…")
+            logf = ws.parent / "prepare.log"
+            proc = _run_dfl(["util", "--input-dir", str(rtm_dir), "--unpack-faceset"],
+                            logf, stdin_text="\n" * 4)
+            try:
+                proc.wait(timeout=3600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            donor_files = sorted(rtm_dir.glob("*.jpg"))
     if n_real < faceset_synth.SYNTH_THRESHOLD and donor_files:
         if progress:
             progress(0.2, f"Solo {n_real} fotos reales: sintetizando faceset "
@@ -589,27 +673,65 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
 AUTO_TARGET_ITERS = int(os.environ.get("FUSER_DFM_TARGET_ITERS", "400000"))
 
 
+def _model_iter(model_dir: Path) -> int:
+    """Iteración actual guardada en el _data.dat del modelo (0 si no se puede leer)."""
+    for dat in model_dir.glob("*_SAEHD_data.dat"):
+        try:
+            with open(dat, "rb") as fh:
+                data = pickle.load(fh)
+            if isinstance(data, dict):
+                return int(data.get("iter", 0) or 0)
+        except Exception:
+            pass
+    return 0
+
+
+# Al RETOMAR un modelo que ya llegó a su objetivo, cuánto más entrenar antes del
+# próximo auto-export (evita el bug de matar/re-exportar en loop al retomar).
+RESUME_EXTRA_ITERS = int(os.environ.get("FUSER_DFM_RESUME_EXTRA", "100000"))
+
+
 def start(name: str) -> str:
     from ..core.face_library import _slug
     slug = _slug(name)
     ws = workspace_of(slug)
-    if not (ws / "model").is_dir():
-        raise ValueError("Ese modelo no está preparado (corré el paso ③).")
+    model = ws / "model"
+    # guard REAL de preparado: caras fuente alineadas + modelo sembrado
+    if not (model.is_dir() and any(model.glob("*.npy"))
+            and any((ws / "data_src" / "aligned").glob("*.jpg"))):
+        raise ValueError("Ese modelo no está preparado. Usá 🧬 CREAR MODELO DFM primero.")
     if is_running(slug):
         return "Ya está entrenando."
+    # objetivo con LÍNEA BASE del contador del modelo (el iter de SAEHD persiste
+    # en el .dat): primer arranque → base+objetivo; retomar tras 'done' → +extra.
+    cur = _model_iter(model)
+    st = _read_state(slug)
+    saved_target = int(st.get("target_iters") or 0)
+    if saved_target and cur < saved_target:
+        target = saved_target                      # sigue rumbo al objetivo original
+    else:
+        target = cur + (RESUME_EXTRA_ITERS if st.get("phase") == "done"
+                        else AUTO_TARGET_ITERS)
+    # rotar el log: el tail viejo mostraría iters >= objetivo y confundiría al autopiloto
     logf = ws.parent / "train.log"
+    if logf.exists():
+        try:
+            os.replace(logf, ws.parent / "train.prev.log")
+        except OSError:
+            pass
     proc = _run_dfl([
         "train",
         "--training-data-src-dir", str(ws / "data_src" / "aligned"),
         "--training-data-dst-dir", str(ws / "data_dst" / "aligned"),
-        "--model-dir", str(ws / "model"),
+        "--model-dir", str(model),
         "--model", "SAEHD",
         "--silent-start", "--no-preview",
     ], logf, detach=True)
     (ws.parent / "train.pid").write_text(str(proc.pid), encoding="utf-8")
-    _write_state(slug, phase="training", name=name, target_iters=AUTO_TARGET_ITERS,
+    _write_state(slug, phase="training", name=name, target_iters=target,
                  started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
-    return f"🏋️ Entrenamiento lanzado (pid {proc.pid}). Corre en segundo plano aunque cierres Fuser."
+    return (f"🏋️ Entrenamiento lanzado (pid {proc.pid}, iter actual {cur:,} → objetivo "
+            f"{target:,}). Corre en segundo plano aunque cierres Fuser.")
 
 
 def _pid_of(slug: str) -> Optional[int]:
@@ -619,14 +741,35 @@ def _pid_of(slug: str) -> Optional[int]:
         return None
 
 
+def _clear_pid(slug: str) -> None:
+    try:
+        (workspace_of(slug).parent / "train.pid").unlink()
+    except OSError:
+        pass
+
+
 def is_running(slug: str) -> bool:
+    """¿El PID guardado sigue siendo NUESTRO entrenamiento?
+
+    Windows reusa PIDs (garantizado tras un reinicio): validamos que el proceso
+    sea python Y que su línea de comandos contenga main.py train — si no, el pid
+    es rancio y se limpia (evita que taskkill mate un proceso ajeno).
+    """
     pid = _pid_of(slug)
     if not pid:
         return False
     try:
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True,
-                             text=True, timeout=15).stdout
-        return str(pid) in out
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
+            capture_output=True, text=True, timeout=20)
+        cmdline = (r.stdout or "").strip().lower()
+        alive = "main.py" in cmdline and "train" in cmdline and "python" in cmdline
+        if not alive and cmdline:
+            _clear_pid(slug)  # PID reusado por otro proceso: pid rancio
+        elif not cmdline:
+            _clear_pid(slug)  # proceso muerto
+        return alive
     except Exception:
         return False
 
@@ -655,8 +798,10 @@ def stop(name: str) -> str:
     slug = _slug(name)
     pid = _pid_of(slug)
     if not pid or not is_running(slug):
+        _clear_pid(slug)
         return "No hay entrenamiento corriendo."
     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30)
+    _clear_pid(slug)
     _write_state(slug, phase="stopped")
     return ("⏸️ Entrenamiento detenido. DFL autoguarda cada ~15 min: como mucho se pierde ese tramo. "
             "Podés retomarlo cuando quieras (mismo botón de entrenar).")
@@ -672,14 +817,22 @@ def export(name: str, timeout: int = 1800) -> Path:
     model = ws / "model"
     if is_running(slug):
         raise ValueError("Pará el entrenamiento antes de exportar.")
-    logf = ws.parent / "export.log"
-    proc = _run_dfl(["exportdfm", "--model-dir", str(model), "--model", "SAEHD"],
-                    logf, stdin_text="\n" * 4)
-    rc = proc.wait(timeout=timeout)
-    dfms = sorted(model.glob("*.dfm"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not dfms:
-        raise RuntimeError(f"El export no generó un .dfm (rc={rc}). Log: {logf}")
-    return dfms[0]
+    with _EXPORT_LOCK:  # nunca dos exportdfm sobre el mismo model-dir
+        logf = ws.parent / "export.log"
+        t0 = time.time()
+        proc = _run_dfl(["exportdfm", "--model-dir", str(model), "--model", "SAEHD"],
+                        logf, stdin_text="\n" * 4)
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise RuntimeError(f"exportdfm superó {timeout}s; proceso matado. Log: {logf}")
+        # exigir un .dfm NUEVO (mtime >= inicio): sin esto, un export fallido
+        # devolvería el .dfm viejo de una corrida anterior como si fuera fresco.
+        fresh = [f for f in model.glob("*.dfm") if f.stat().st_mtime >= t0 - 5]
+        if not fresh:
+            raise RuntimeError(f"El export no generó un .dfm nuevo (rc={rc}). Log: {logf}")
+        return max(fresh, key=lambda f: f.stat().st_mtime)
 
 
 # ---------------------------------------------------------------------------
@@ -689,8 +842,15 @@ _AUTOPILOT = {"started": False}
 
 
 def autopilot_scan() -> List[str]:
-    """Revisa los entrenamientos: si alguno llegó a su objetivo, lo corta,
-    exporta el .dfm y lo registra en la Biblioteca de Caras. Devuelve acciones."""
+    """Revisa los entrenamientos: al llegar al objetivo corta, exporta y registra.
+
+    Decisiones anti-bug (revisión adversarial):
+    - El avance se mide con el ITER DEL MODELO (.dat), no con el tail del log
+      (el log rota en start(), pero el .dat es la verdad).
+    - Actúa aunque el proceso ya no corra (export fallido previo, reinicio de la
+      máquina con el objetivo alcanzado): sin exigir running=True no hay deadlock.
+    - phase='exporting' como guard de reentrada; 'export_failed' se reintenta.
+    """
     acts: List[str] = []
     wsr = _paths()["workspaces"]
     if not wsr.is_dir():
@@ -700,24 +860,28 @@ def autopilot_scan() -> List[str]:
             st = json.loads((d / "state.json").read_text(encoding="utf-8"))
         except Exception:
             continue
-        if st.get("phase") != "training":
+        if st.get("phase") not in ("training", "export_failed"):
             continue
         slug = d.name
         name = st.get("name", slug)
-        info = progress_info(slug)
         target = int(st.get("target_iters", AUTO_TARGET_ITERS))
-        if info["running"] and info["iter"] and info["iter"] >= target:
-            try:
+        cur = _model_iter(workspace_of(slug) / "model")
+        if cur < target:
+            continue
+        _write_state(slug, phase="exporting")
+        try:
+            if is_running(slug):
                 stop(slug)
-                dfm = export(slug)
-                from .face_library import set_dfm
-                msg = set_dfm(name, str(dfm))
-                _write_state(slug, phase="done", exported=str(dfm))
-                log.info("Autopiloto: %s → %s", name, msg)
-                acts.append(f"{name}: {msg}")
-            except Exception as exc:  # reintenta en el próximo tick
-                log.warning("Autopiloto falló en %s: %s", name, exc)
-                _write_state(slug, phase="training")
+                time.sleep(5)  # que DFL suelte los archivos del modelo
+            dfm = export(slug)
+            from .face_library import set_dfm
+            msg = set_dfm(name, str(dfm))
+            _write_state(slug, phase="done", exported=str(dfm))
+            log.info("Autopiloto: %s → %s", name, msg)
+            acts.append(f"{name}: {msg}")
+        except Exception as exc:  # se reintenta en el próximo tick (sin exigir running)
+            log.warning("Autopiloto falló en %s: %s", name, exc)
+            _write_state(slug, phase="export_failed", last_error=str(exc)[:200])
     return acts
 
 
