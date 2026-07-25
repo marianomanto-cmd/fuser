@@ -666,7 +666,7 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
                  synthetic=(synth_info or {}).get("synthetic", 0), real=n_real,
                  prepared_at=time.strftime("%Y-%m-%d %H:%M:%S"))
     return (f"✅ Workspace listo: {src_txt} · {dst_txt} · "
-            f"modelo sembrado del RTT (pretrain OFF, batch 4). Ya podés entrenar.")
+            f"modelo sembrado del RTT (pretrain OFF, batch {batch}). Ya podés entrenar.")
 
 
 # ---------------------------------------------------------------------------
