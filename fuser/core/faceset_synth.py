@@ -227,7 +227,16 @@ def _identity_gate(real_dir: Path, out_dir: Path,
     def _emb(img):
         fs = det.get(img)
         if not fs:
-            return None
+            # Los crops alineados 512 llenan el frame con la cara y el detector
+            # (entrenado para caras chicas) suele NO verla: reintentar con lienzo
+            # acolchado 2x (la cara pasa a ocupar ~50% y detecta bien).
+            h, w = img.shape[:2]
+            canvas = np.full((h * 2, w * 2, 3), 127, np.uint8)
+            y0, x0 = h // 2, w // 2
+            canvas[y0:y0 + h, x0:x0 + w] = img
+            fs = det.get(canvas)
+            if not fs:
+                return None
         b = max(fs, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]))
         return b.normed_embedding
 
