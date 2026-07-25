@@ -183,7 +183,12 @@ def synthesize(real_dir: Path, donor_files: List[Path], out_dir: Path,
         raise RuntimeError("La síntesis no produjo caras en la pasada de forma.")
     mid_files = sorted(tmp.glob("*.png"))
     n2 = _run_pass("pass2", real_dir, mid_files, out_dir,
-                   progress, 0.55, 1.0, "Síntesis 2/2 · textura (inswapper)")
+                   progress, 0.55, 0.9, "Síntesis 2/2 · textura (inswapper)")
+    # PUERTA DE CALIDAD: los donantes difíciles (oclusiones fuertes: gorras,
+    # lentes, oscuridad) salen mal transformados — medido en stock: crops con la
+    # cara del DONANTE casi intacta. Cada crop se mide contra la persona real y
+    # los flojos NO entran al dataset (mejor menos y bueno que mucho y sucio).
+    n2 = _identity_gate(real_dir, out_dir, progress)
     # limpieza de la etapa intermedia
     for f in mid_files:
         try:
@@ -198,6 +203,64 @@ def synthesize(real_dir: Path, donor_files: List[Path], out_dir: Path,
         raise RuntimeError("La síntesis no produjo caras en la pasada de textura.")
     log.info("Faceset sintético: %d crops (de %d donantes).", n2, len(donors))
     return {"synthetic": n2, "donors_used": len(donors)}
+
+
+# Umbral de la puerta de identidad (cos ArcFace del crop sintético vs persona).
+SYNTH_MIN_ID = float(__import__("os").environ.get("FUSER_SYNTH_MIN_ID", "0.35"))
+
+
+def _identity_gate(real_dir: Path, out_dir: Path,
+                   progress: Optional[Callable] = None) -> int:
+    """Borra los crops sintéticos que no llevan la identidad de la persona.
+
+    CPU (buffalo_l): centroide de las fotos reales → cos de cada crop; borra los
+    de cos < SYNTH_MIN_ID o sin cara detectable. Devuelve cuántos quedaron.
+    """
+    import cv2
+    import numpy as np
+    from insightface.app import FaceAnalysis
+
+    det = FaceAnalysis(name="buffalo_l", root=str(config.INSIGHTFACE_ROOT),
+                       providers=["CPUExecutionProvider"])
+    det.prepare(ctx_id=-1, det_size=(640, 640))
+
+    def _emb(img):
+        fs = det.get(img)
+        if not fs:
+            return None
+        b = max(fs, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]))
+        return b.normed_embedding
+
+    reals = []
+    for p in sorted(Path(real_dir).iterdir()):
+        if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+            img = cv2.imread(str(p))
+            e = _emb(img) if img is not None else None
+            if e is not None:
+                reals.append(e)
+    if not reals:
+        log.warning("identity_gate: sin embeddings reales; no filtro.")
+        return len(list(out_dir.glob("*.png")))
+    cent = np.mean(reals, axis=0)
+    cent /= np.linalg.norm(cent) + 1e-8
+
+    files = sorted(out_dir.glob("*.png"))
+    kept = dropped = 0
+    for i, f in enumerate(files):
+        if progress and i % 15 == 0:
+            progress(0.9 + 0.1 * i / max(1, len(files)),
+                     f"Puerta de calidad {i}/{len(files)}…")
+        img = cv2.imread(str(f))
+        e = _emb(img) if img is not None else None
+        score = float(np.dot(e, cent)) if e is not None else -1.0
+        if score < SYNTH_MIN_ID:
+            f.unlink(missing_ok=True)
+            dropped += 1
+        else:
+            kept += 1
+    log.info("identity_gate: %d ok · %d descartados (cos<%s o sin cara).",
+             kept, dropped, SYNTH_MIN_ID)
+    return kept
 
 
 def real_duplication(n_real: int, n_synth: int) -> int:
