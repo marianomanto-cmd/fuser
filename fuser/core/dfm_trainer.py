@@ -336,6 +336,7 @@ def install(progress: Optional[Callable] = None) -> str:
     st = status()
     if not st["build_ready"]:
         raise RuntimeError("El build quedó incompleto: no encuentro python embebido/main.py.")
+    _patch_trainer_autosave()
     return "✅ Entrenador local instalado (" + ", ".join(msgs or ["ya estaba"]) + f") en {st['root']}"
 
 
@@ -677,6 +678,28 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
 AUTO_TARGET_ITERS = int(os.environ.get("FUSER_DFM_TARGET_ITERS", "400000"))
 
 
+def _patch_trainer_autosave(minutes: int = 5) -> None:
+    """Acorta el autosave del Trainer de DFL (default 25 min → 5).
+
+    Sin esto, pausar/exportar puede tirar hasta 25 min de entrenamiento (medido:
+    465 iters perdidas — el modelo quedó en iter=1). Idempotente; corre en
+    install() y como cinturón en start().
+    """
+    main = _find_main(_paths())
+    if not main:
+        return
+    trainer = main.parent / "mainscripts" / "Trainer.py"
+    try:
+        src = trainer.read_text(encoding="utf-8")
+        if "save_interval_min = 25" in src:
+            trainer.write_text(src.replace("save_interval_min = 25",
+                                           f"save_interval_min = {minutes}"),
+                               encoding="utf-8")
+            log.info("Trainer de DFL parcheado: autosave cada %d min.", minutes)
+    except OSError as exc:
+        log.warning("No pude parchear el autosave del Trainer: %s", exc)
+
+
 def _model_iter(model_dir: Path) -> int:
     """Iteración actual guardada en el _data.dat del modelo (0 si no se puede leer)."""
     for dat in model_dir.glob("*_SAEHD_data.dat"):
@@ -716,6 +739,7 @@ def start(name: str) -> str:
     else:
         target = cur + (RESUME_EXTRA_ITERS if st.get("phase") == "done"
                         else AUTO_TARGET_ITERS)
+    _patch_trainer_autosave()  # cinturón: reinstalaciones/updates del build
     # rotar el log: el tail viejo mostraría iters >= objetivo y confundiría al autopiloto
     logf = ws.parent / "train.log"
     if logf.exists():
