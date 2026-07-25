@@ -28,13 +28,37 @@ _DET = None
 
 
 def _detector():
+    """Detector del curado — en GPU si hay (DirectML), si no CPU.
+
+    Curar miles de fotogramas en CPU es el cuello de botella de la creación del
+    modelo (~2 s por imagen). En GPU es varias veces más rápido y en ese momento
+    nada más la está usando. Se libera con ``release_detector()`` al terminar
+    para NO retener VRAM mientras entrena DeepFaceLab.
+    """
     global _DET
     if _DET is None:
         from insightface.app import FaceAnalysis
+        providers, ctx = ["CPUExecutionProvider"], -1
+        try:
+            import onnxruntime as ort
+            if "DmlExecutionProvider" in ort.get_available_providers():
+                providers, ctx = ["DmlExecutionProvider", "CPUExecutionProvider"], 0
+        except Exception:  # pragma: no cover - sin onnxruntime: CPU
+            pass
         _DET = FaceAnalysis(name="buffalo_l", root=str(config.INSIGHTFACE_ROOT),
-                            providers=["CPUExecutionProvider"])
-        _DET.prepare(ctx_id=-1, det_size=(640, 640))
+                            providers=providers)
+        _DET.prepare(ctx_id=ctx, det_size=(640, 640))
+        log.info("Curado: detector en %s", "GPU (DirectML)" if ctx == 0 else "CPU")
     return _DET
+
+
+def release_detector() -> None:
+    """Suelta el detector (y su VRAM). Se llama al terminar de curar."""
+    global _DET
+    if _DET is not None:
+        _DET = None
+        import gc
+        gc.collect()
 
 
 def iter_images(root: Path):
@@ -165,6 +189,9 @@ def curate(
             if progress:
                 progress(1.0, "Curado listo")
 
+    # soltar la VRAM del detector: lo que sigue (alineado y entrenamiento) la
+    # necesita entera para DeepFaceLab.
+    release_detector()
     return report
 
 
