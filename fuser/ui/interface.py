@@ -423,7 +423,22 @@ def _on_trainer_refresh(cara):
     from ..core import dfm_trainer
     if not cara:
         return "⚠️ Elegí el modelo.", gr.update()
-    shots = dfm_trainer.preview_images(cara, limit=6)
+    # Gradio solo sirve archivos bajo el cwd/temp: los previews viven en E:
+    # (workspaces de DeepFaceLab), así que se copian a tmp/ de la app.
+    raw = dfm_trainer.preview_images(cara, limit=6)
+    shots = []
+    if raw:
+        import shutil as _sh
+        cache = config.TEMP_DIR / "preview_cache"
+        _sh.rmtree(cache, ignore_errors=True)
+        cache.mkdir(parents=True, exist_ok=True)
+        for i, (src_p, label) in enumerate(raw):
+            try:
+                dst_p = cache / f"{i:02d}_{Path(src_p).name}"
+                _sh.copyfile(src_p, dst_p)
+                shots.append((str(dst_p), label))
+            except OSError as exc:
+                log.warning("No pude copiar el preview %s: %s", src_p, exc)
     gallery = gr.update(value=shots) if shots else gr.update()
     info = dfm_trainer.progress_info(cara)
     run = "🏃 ENTRENANDO" if info["running"] else "⏸️ detenido"
