@@ -740,6 +740,11 @@ def start(name: str) -> str:
         target = cur + (RESUME_EXTRA_ITERS if st.get("phase") == "done"
                         else AUTO_TARGET_ITERS)
     _patch_trainer_autosave()  # cinturón: reinstalaciones/updates del build
+    # cinturón: un .dfm dentro de model/ CONGELA el resume (workspaces viejos)
+    exports = ws.parent / "exports"
+    for stray in model.glob("*.dfm"):
+        exports.mkdir(exist_ok=True)
+        os.replace(stray, exports / stray.name)
     # rotar el log: el tail viejo mostraría iters >= objetivo y confundiría al autopiloto
     logf = ws.parent / "train.log"
     if logf.exists():
@@ -860,7 +865,17 @@ def export(name: str, timeout: int = 1800) -> Path:
         fresh = [f for f in model.glob("*.dfm") if f.stat().st_mtime >= t0 - 5]
         if not fresh:
             raise RuntimeError(f"El export no generó un .dfm nuevo (rc={rc}). Log: {logf}")
-        return max(fresh, key=lambda f: f.stat().st_mtime)
+        newest = max(fresh, key=lambda f: f.stat().st_mtime)
+        # SACAR el .dfm de model/: un .dfm dentro del dir del modelo CONGELA el
+        # próximo resume de DFL en esta GPU (medido: colgado silencioso post
+        # "Sort by yaw"; sin el archivo, entrena normal).
+        exports = ws.parent / "exports"
+        exports.mkdir(exist_ok=True)
+        dst = exports / newest.name
+        os.replace(newest, dst)
+        for stray in model.glob("*.dfm"):
+            os.replace(stray, exports / stray.name)
+        return dst
 
 
 # ---------------------------------------------------------------------------
