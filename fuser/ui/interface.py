@@ -453,18 +453,8 @@ def _on_finish_export(cara, progress=gr.Progress()):
             gr.update(choices=_dfm_choices()))
 
 
-def _on_deepswap_process(dfm_id, video_path, mode, progress=gr.Progress()):
-    """🎬 Montar la cara del modelo .dfm en un video (pestaña Deep Swap).
-
-    Usa el preset de calidad elegido (máscaras/enhancer/temporal/QC) con el Deep
-    Swapper como motor de identidad, y EXPRIME VRAM+RAM (el principio de la app):
-    RAM_MAX (buffers de 40 GB, 2 pasadas por tramos) + MODE_MAX_QUALITY (arena
-    de VRAM grande) + CRF 12.
-    """
-    if not dfm_id or dfm_id == NO_DFM:
-        raise gr.Error("Elegí un modelo .dfm (crealo arriba, o importalo).")
-    if not video_path:
-        raise gr.Error("Subí el video donde montar la cara.")
+def _deepswap_settings(dfm_id: str, mode: str) -> config.Settings:
+    """Settings del montaje con .dfm: preset de calidad + VRAM/RAM al máximo."""
     s = config.Settings()
     preset = config.EXPRESSION_PRESETS.get(mode, config.EXPRESSION_PRESETS[config.EXPR_MAXIDENTITY])
     for k, v in preset.items():
@@ -477,16 +467,138 @@ def _on_deepswap_process(dfm_id, video_path, mode, progress=gr.Progress()):
     s.memory_mode = config.MODE_MAX_QUALITY      # arena de VRAM grande
     s.gpu_mem_limit_gb = config.MEMORY_PRESETS[config.MODE_MAX_QUALITY]["gpu_mem_limit_gb"]
     s.output_quality = 12                        # CRF: calidad de salida alta
+    return s
+
+
+def _split_into_chunks(video_path: str, secs: int, out_dir: Path) -> List[Path]:
+    """Corta el video en partes de ``secs`` con UNA pasada de ffmpeg (segment).
+
+    Reencoda para que los cortes sean exactos (no depende de keyframes) y
+    conserva el audio de cada parte. Reusa lo ya cortado (mismo video + tamaño).
+    """
+    import subprocess
+
+    from ..utils.system import ffmpeg_path
+
+    ff = ffmpeg_path()
+    if not ff:
+        raise gr.Error("FFmpeg no disponible.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing = sorted(out_dir.glob("in_*.mp4"))
+    if existing:
+        return existing
+    # -force_key_frames: sin esto el muxer 'segment' solo corta en los keyframes
+    # QUE YA TRAE el video (medido: pedir 3 s daba partes de 8 s). Forzamos un
+    # keyframe exacto cada `secs` para que las partes salgan del tamaño pedido.
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", video_path,
+           "-c:v", "libx264", "-crf", "16", "-preset", "veryfast",
+           "-force_key_frames", f"expr:gte(t,n_forced*{int(secs)})",
+           "-c:a", "aac", "-reset_timestamps", "1",
+           "-f", "segment", "-segment_time", str(int(secs)),
+           "-segment_time_delta", "0.05",
+           str(out_dir / "in_%04d.mp4")]
     try:
-        progress(0.0, desc="Cargando el modelo entrenado…")
-        pipeline = _get_pipeline(s, progress=lambda f, m="": progress(f * 0.12, desc=m))
-        src = _prepare(pipeline, None, video_path, None)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
+    except subprocess.CalledProcessError as exc:
+        err = (exc.stderr or b"").decode("utf-8", "ignore")[-300:]
+        raise gr.Error(f"FFmpeg falló al cortar el video: {err}")
+    parts = sorted(out_dir.glob("in_*.mp4"))
+    if not parts:
+        raise gr.Error("El corte no produjo partes (¿video ilegible?).")
+    return parts
 
-        def cb(frac, msg=""):
-            progress(0.12 + frac * 0.88, desc=msg)
 
-        out_path = pipeline.process_video(video_path, progress=cb)
-        return out_path, out_path, f"✅ ¡Video montado con el modelo! {src}"
+def _fmt_eta(secs: float) -> str:
+    secs = int(max(0, secs))
+    h, m = secs // 3600, (secs % 3600) // 60
+    return f"{h} h {m:02d} min" if h else f"{m} min"
+
+
+def _on_deepswap_process(dfm_id, video_path, mode, chunk_secs, progress=gr.Progress()):
+    """🎬 Montar la cara del modelo .dfm — POR PARTES, con vista en vivo.
+
+    Es un *generator*: corta el video en tramos de ``chunk_secs`` y va emitiendo
+    CADA parte terminada para que puedas verla y controlar la calidad sin esperar
+    el video entero (un 10 min a máxima calidad son horas). Al final une todo.
+
+    Reanudable: las partes ya procesadas se saltean, así que si parás y volvés a
+    darle, sigue donde quedó. VRAM/RAM al máximo (ver _deepswap_settings); el
+    modelo se carga UNA sola vez para todas las partes.
+    """
+    import time as _t
+
+    if not dfm_id or dfm_id == NO_DFM:
+        raise gr.Error("Elegí un modelo .dfm (crealo arriba, o importalo).")
+    if not video_path:
+        raise gr.Error("Subí el video donde montar la cara.")
+
+    s = _deepswap_settings(dfm_id, mode)
+    stem = Path(video_path).stem[:40]
+    work = config.OUTPUTS_DIR / f"deepswap_{face_library._slug(dfm_id.split('/')[-1])}_{stem}"
+    parts_in = work / "partes_entrada"
+    parts_out = work / "partes_listas"
+    parts_out.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if int(chunk_secs or 0) <= 0:
+            chunks = [Path(video_path)]          # "video entero": una sola parte
+        else:
+            progress(0.01, desc="Cortando el video en partes…")
+            chunks = _split_into_chunks(video_path, int(chunk_secs), parts_in)
+        n = len(chunks)
+        progress(0.03, desc=f"{n} partes · cargando el modelo entrenado…")
+        pipeline = _get_pipeline(s, progress=lambda f, m="": progress(0.03 + f * 0.05, desc=m))
+        _prepare(pipeline, None, str(chunks[0]), None)
+
+        done: list = []
+        t0 = _t.time()
+        spent = 0.0                      # tiempo real gastado (sin las salteadas)
+        computed = 0
+        yield None, [], f"▶️ **{n} partes** de {int(chunk_secs)} s. Procesando…"
+
+        for i, ch in enumerate(chunks):
+            out_path = parts_out / f"parte_{i + 1:04d}.mp4"
+            if out_path.is_file() and out_path.stat().st_size > 1000:
+                done.append(str(out_path))          # reanudación: ya estaba hecha
+                yield str(out_path), done, (f"⏩ Parte **{i + 1}/{n}** ya estaba lista "
+                                            f"(reanudando)…")
+                continue
+
+            def cb(frac, msg="", _i=i):
+                overall = 0.08 + 0.87 * (_i + frac) / n
+                progress(overall, desc=f"Parte {_i + 1}/{n} · {msg}")
+
+            t_chunk = _t.time()
+            pipeline.process_video(str(ch), output_path=str(out_path), progress=cb)
+            spent += _t.time() - t_chunk
+            computed += 1
+            done.append(str(out_path))
+
+            per = spent / max(1, computed)
+            eta = per * (n - i - 1)
+            yield str(out_path), done, (
+                f"✅ Parte **{i + 1}/{n}** lista — miralá arriba para controlar la calidad.\n\n"
+                f"⏱️ {_fmt_eta(per)} por parte · faltan **{_fmt_eta(eta)}** ({n - i - 1} partes).\n\n"
+                f"*Podés frenar cuando quieras: lo hecho queda guardado y al volver a darle "
+                f"continúa desde acá.*")
+
+        progress(0.96, desc="Uniendo las partes…")
+        final = str(config.OUTPUTS_DIR / f"{stem}_deepswap.mp4")
+        merged = videoutil.concat_videos(done, final, drop_seam=False, crf=12)
+        if merged:
+            try:
+                with_audio = str(config.OUTPUTS_DIR / f"{stem}_deepswap_audio.mp4")
+                if videoutil.mux_audio(final, video_path, with_audio):
+                    final = with_audio
+            except Exception:
+                log.warning("No pude remuxear el audio original", exc_info=True)
+            yield final, done + [final], (
+                f"🎉 **Video completo listo** ({n} partes unidas · {_fmt_eta(spent)} de proceso).\n\n"
+                f"Las partes sueltas quedan en `{parts_out}`.")
+        else:
+            yield done[-1] if done else None, done, (
+                f"⚠️ Las {n} partes están listas pero la unión falló. "
+                f"Las tenés todas en `{parts_out}` (podés unirlas a mano).")
     except gr.Error:
         raise
     except Exception as exc:  # pragma: no cover
@@ -1554,9 +1666,18 @@ def build_interface() -> gr.Blocks:
                             info="Máscaras, enhancer, estabilidad temporal y QC del preset; la "
                                  "identidad la pone el modelo. VRAM+RAM se exprimen siempre.",
                         )
+                        ds_chunk = gr.Dropdown(
+                            choices=[("15 segundos (ver resultados muy seguido)", 15),
+                                     ("30 segundos (equilibrado)", 30),
+                                     ("60 segundos (menos uniones)", 60),
+                                     ("Video entero (sin partes)", 0)],
+                            value=30, label="✂️ Procesar por partes de",
+                            info="Cada parte terminada aparece abajo al instante para que "
+                                 "controles la calidad sin esperar el video entero.",
+                        )
                         ds_process_btn = gr.Button("🎬 MONTAR CARA EN EL VIDEO", variant="primary")
-                        ds_output = gr.Video(label="Resultado")
-                        ds_file = gr.File(label="⬇️ Descargar")
+                        ds_output = gr.Video(label="👁️ Última parte terminada (mirá la calidad acá)")
+                        ds_file = gr.Files(label="⬇️ Partes listas (y el video completo al final)")
                         ds_status = gr.Markdown("", elem_classes="fuser-soft")
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
@@ -1627,7 +1748,7 @@ def build_interface() -> gr.Blocks:
         )
         ds_process_btn.click(
             _on_deepswap_process,
-            inputs=[ds_dfm_choice, ds_video, ds_mode],
+            inputs=[ds_dfm_choice, ds_video, ds_mode, ds_chunk],
             outputs=[ds_output, ds_file, ds_status],
         )
 
