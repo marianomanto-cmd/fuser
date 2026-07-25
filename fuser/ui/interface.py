@@ -624,6 +624,9 @@ def _memory_panel(engine: str, ram_mode: str, memory_mode: str, force_cpu: bool)
 def _on_preview(source_files, face_choice, dfm_choice, video_path, n_preview, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
     _apply_dfm(settings, face_choice, dfm_choice)
+    # La cadena 2-pasadas solo existe en "Procesar video completo": en preview se
+    # muestra la pasada de forma sola (aprox honesta y rápida), no un falso PRO.
+    settings.chain_shape_then_texture = False
     try:
         progress(0.02, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.4, desc=m))
@@ -851,6 +854,9 @@ def _on_process_queue(source_files, face_choice, dfm_choice, video_queue, *contr
     """
     settings = _build_settings(*control_values)
     deep = _apply_dfm(settings, face_choice, dfm_choice)
+    # La cadena 2-pasadas no está implementada por-item en la cola: correr una
+    # pasada única real es más honesto que fingir el PRO.
+    settings.chain_shape_then_texture = False
     source_paths = _resolve_source_paths(source_files, face_choice)
     if not source_paths and not deep:
         raise gr.Error("Elegí una Cara guardada o subí al menos una imagen fuente.")
@@ -869,6 +875,7 @@ def _on_process_queue(source_files, face_choice, dfm_choice, video_queue, *contr
             images.append(img)
     if not images and not deep:
         raise gr.Error("No se pudieron leer las imágenes fuente.")
+    stats = None
     if images:
         try:
             stats = pipeline.prepare_source(images)
@@ -887,12 +894,16 @@ def _on_process_queue(source_files, face_choice, dfm_choice, video_queue, *contr
 
     while work:
         vpath, attempt = work.popleft()
-        # En modo "por referencia", la referencia se toma de CADA video.
+        # En modo "por referencia", la referencia se toma de CADA video. Un video
+        # ilegible acá no debe tumbar la COLA entera: se trata como fallo del item.
         if pipeline.settings.face_selector == config.FACE_SELECTOR_REFERENCE:
-            info = videoutil.probe(vpath)
-            mid = videoutil.get_frames_at(vpath, [info.frame_count // 2])
-            if mid:
-                pipeline.set_reference_from_frame(mid[0], pipeline.settings.reference_face_index)
+            try:
+                info = videoutil.probe(vpath)
+                mid = videoutil.get_frames_at(vpath, [info.frame_count // 2])
+                if mid:
+                    pipeline.set_reference_from_frame(mid[0], pipeline.settings.reference_face_index)
+            except Exception:
+                log.exception("No pude tomar referencia de %s", vpath)
 
         name = Path(vpath).name
         done = len(outputs) + len(failed)

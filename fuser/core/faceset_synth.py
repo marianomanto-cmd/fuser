@@ -34,7 +34,14 @@ log = get_logger(__name__)
 # entrenar 100% con material real — la síntesis es solo relleno de emergencia.)
 SYNTH_THRESHOLD = 150
 # Cuántos crops sintéticos generar (env-tunable). Más = más cobertura, más horas.
-SYNTH_TARGET = int(__import__("os").environ.get("FUSER_SYNTH_TARGET", "1000"))
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(__import__("os").environ.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+SYNTH_TARGET = _env_int("FUSER_SYNTH_TARGET", 1000, 20, 5000)
 # Peso de lo REAL cuando la síntesis se activa: PREDOMINA el material original
 # (≈50/50 por duplicación; el resto de las veces el dataset es 100% real).
 REAL_FRACTION = 0.5
@@ -55,16 +62,20 @@ def _settings_pass1() -> config.Settings:
 
 
 def _settings_pass2() -> config.Settings:
-    """inswapper@512 + CodeFormer fiel (pasada de textura de la cadena PRO).
+    """inswapper@512 + enhancer del preset PRO (pasada de textura de la cadena).
 
-    Pixel boost 512 (la receta MAX medida), NO el nativo 128: los donantes son
-    crops de 512 px y bajar el swap a 128 tiraría detalle.
+    Los valores de enhancer salen del PRESET EXPR_MAXID_CHAIN (una sola fuente de
+    verdad: si se recalibra el preset medido, la síntesis lo hereda). Pixel boost
+    512 (la receta MAX medida), NO el nativo 128: los donantes son crops de 512.
     """
     s = _settings_pass1()
+    pro = config.EXPRESSION_PRESETS.get(config.EXPR_MAXID_CHAIN, {})
+    for k in ("enhancer_model", "enhancer_blend", "codeformer_fidelity",
+              "ff_enhancer_weight", "ff_swapper_weight"):
+        if k in pro:
+            setattr(s, k, pro[k])
     s.ff_swapper_model = "inswapper_128"; s.ff_pixel_boost = "512x512"
     s.ff_geometry_mask = False
-    s.enhancer_model = "codeformer"; s.enhancer_blend = 0.7
-    s.codeformer_fidelity = 0.5; s.ff_enhancer_weight = 0.7
     return s
 
 

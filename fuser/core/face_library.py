@@ -94,6 +94,9 @@ def save_face(name: str, image_paths: List[str]) -> str:
     name = (name or "").strip()
     if not name:
         raise ValueError("Poné un nombre para la cara (p.ej. 'Cara 1').")
+    if not _slug(name):
+        # solo emojis/símbolos → slug vacío → escribiría en la RAÍZ de faces/
+        raise ValueError("El nombre necesita al menos una letra o número (p.ej. 'Cara 1').")
     valid = [p for p in (image_paths or []) if p and Path(p).suffix.lower() in IMG_EXTS and Path(p).is_file()]
     if not valid:
         raise ValueError("Subí al menos una foto (jpg/png/webp) de esta persona.")
@@ -184,8 +187,10 @@ def set_dfm(name: str, dfm_path: str) -> str:
     Swapper lo registra como ``custom/<slug>`` sin editar código.
     """
     name = (name or "").strip()
+    if not name or not _slug(name):
+        raise ValueError("Elegí una Cara válida para asociarle el .dfm.")
     d = face_dir(name)
-    if not d.is_dir():
+    if not d.is_dir() or not (d / MANIFEST).is_file():
         raise ValueError(f"No existe la cara «{name}». Guardala primero con sus fotos.")
     if not dfm_path or Path(dfm_path).suffix.lower() != ".dfm" or not Path(dfm_path).is_file():
         raise ValueError("Subí un archivo .dfm válido (el modelo entrenado en DeepFaceLab).")

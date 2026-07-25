@@ -659,6 +659,11 @@ class FaceFusionSwapper(BaseFaceSwapper):
 
     @property
     def has_source(self) -> bool:
+        # Con Deep Swapper (.dfm) la identidad viene HORNEADA en el modelo: no
+        # hace falta cara fuente (sin esto, process_video/preview rechazan el
+        # montaje con "falta la cara fuente").
+        if getattr(self.settings, "ff_deep_swapper_model", ""):
+            return True
         return self._source_face is not None
 
     def update_runtime(self, settings) -> None:
