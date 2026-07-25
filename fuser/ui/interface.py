@@ -419,9 +419,12 @@ def _on_trainer_stop(cara):
 
 
 def _on_trainer_refresh(cara):
+    """Estado del entrenamiento + galería de previews (¿va bien el modelo?)."""
     from ..core import dfm_trainer
     if not cara:
-        return "⚠️ Elegí el modelo."
+        return "⚠️ Elegí el modelo.", gr.update()
+    shots = dfm_trainer.preview_images(cara, limit=6)
+    gallery = gr.update(value=shots) if shots else gr.update()
     info = dfm_trainer.progress_info(cara)
     run = "🏃 ENTRENANDO" if info["running"] else "⏸️ detenido"
     lines = [_trainer_status_md(), f"**Estado:** {run} · fase: {info['phase']}"]
@@ -429,9 +432,16 @@ def _on_trainer_refresh(cara):
         lines.append(f"**Iteración:** {info['iter']:,} / ~{dfm_trainer.AUTO_TARGET_ITERS:,} · "
                      f"{info['ms']} ms/iter · pérdida src {info['loss_src']} / dst {info['loss_dst']}")
         lines.append("*Guía: >100k = parecido inicial · 300-600k = bueno · el autopiloto corta solo.*")
+    if shots:
+        lines.append("👁️ **Previews abajo** (del más viejo al más nuevo). En cada imagen, la "
+                     "**última columna** es *tu cara montada en el destino*: si se va viendo más "
+                     "nítida y parecida a la persona, el modelo va bien.")
+    else:
+        lines.append("👁️ *Todavía no hay previews: aparece la primera al primer autoguardado "
+                     "(~5 min de entrenamiento).*")
     if info["tail"]:
         lines.append("```\n" + info["tail"][-900:] + "\n```")
-    return "\n\n".join(lines)
+    return "\n\n".join(lines), gallery
 
 
 def _on_finish_export(cara, progress=gr.Progress()):
@@ -1648,6 +1658,11 @@ def build_interface() -> gr.Blocks:
                             cm_resume_btn = gr.Button("▶️ Retomar", variant="secondary")
                         cm_finish_btn = gr.Button("⏹️ Terminar y exportar YA", variant="stop")
                         cm_train_status = gr.Markdown("", elem_classes="fuser-soft")
+                        cm_preview = gr.Gallery(
+                            label="👁️ Evolución del modelo — cada imagen: [tu cara | reconstruida | "
+                                  "destino | reconstruido | TU CARA EN EL DESTINO]",
+                            columns=2, height=420, object_fit="contain", show_label=True,
+                        )
                         with gr.Accordion("Importar un .dfm entrenado afuera (opcional)", open=False):
                             cm_dfm_file = gr.File(label=".dfm", file_types=[".dfm"], type="filepath")
                             cm_import_btn = gr.Button("Importar este .dfm al modelo elegido")
@@ -1733,7 +1748,8 @@ def build_interface() -> gr.Blocks:
             inputs=[cm_name, cm_files, cm_person_videos, cm_dst_videos],
             outputs=[cm_train_status, face_choice, lib_delete, cm_model_cara],
         )
-        cm_refresh_btn.click(_on_trainer_refresh, inputs=cm_model_cara, outputs=cm_train_status)
+        cm_refresh_btn.click(_on_trainer_refresh, inputs=cm_model_cara,
+                             outputs=[cm_train_status, cm_preview])
         cm_stop_btn.click(_on_trainer_stop, inputs=cm_model_cara, outputs=cm_train_status)
         cm_resume_btn.click(_on_trainer_resume, inputs=cm_model_cara, outputs=cm_train_status)
         cm_finish_btn.click(

@@ -654,7 +654,16 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
     # VRAM → batch más alto = más VRAM útil por iteración. Env-tuneable; el
     # harness de prueba valida el valor en esta GPU (8GB DX12, res 224).
     batch = int(os.environ.get("FUSER_DFM_BATCH", "8"))
-    _patch_model_options(model, pretrain=False, batch_size=batch, models_opt_on_gpu=False)
+    # write_preview_history: DFL guarda en <modelo>_history/ una imagen por
+    # autoguardado (cada 5 min) con [tu cara | reconstruida | destino |
+    # reconstruido | TU CARA EN EL DESTINO]. Es la ventana para ver si el
+    # modelo va bien SIN esperar a que termine (la muestra la UI).
+    _patch_model_options(model, pretrain=False, batch_size=batch,
+                         models_opt_on_gpu=False, write_preview_history=True)
+    # el RTT trae sus PROPIAS muestras de preview cacheadas: limpiarlas para que
+    # el preview se regenere con TU cara (si no, muestra las caras del RTT).
+    _reset_preview_samples(model)
+    shutil.rmtree(model / "new_SAEHD_history", ignore_errors=True)  # historia del preentrenado
 
     n_dst = len(list((data_dst / "aligned").glob("*.jpg")))
     dst_txt = (f"{n_dst} caras destino (de tus videos)" if dst_videos
@@ -700,6 +709,39 @@ def _patch_trainer_autosave(minutes: int = 5) -> None:
         log.warning("No pude parchear el autosave del Trainer: %s", exc)
 
 
+def _reset_preview_samples(model_dir: Path) -> bool:
+    """Borra las muestras de preview CACHEADAS que trae el preentrenado.
+
+    ModelBase guarda ``sample_for_preview`` DENTRO del .dat del modelo y solo lo
+    regenera si está vacío (ModelBase.py:151/227). Como sembramos desde el RTT,
+    sin esto el preview del entrenamiento mostraría para siempre las caras del
+    RTT (Keanu + famosos) en vez de las TUYAS — verificado a ojo. También limpia
+    ``loss_history`` para que el gráfico sea el de TU entrenamiento.
+    """
+    ok = False
+    for dat in model_dir.glob("*_SAEHD_data.dat"):
+        try:
+            with open(dat, "rb") as fh:
+                data = pickle.load(fh)
+            if not isinstance(data, dict):
+                continue
+            changed = False
+            if data.get("sample_for_preview") is not None:
+                data["sample_for_preview"] = None
+                changed = True
+            if data.get("loss_history"):
+                data["loss_history"] = []
+                changed = True
+            if changed:
+                with open(dat, "wb") as fh:
+                    pickle.dump(data, fh)
+                log.info("Muestras de preview del preentrenado limpiadas en %s", dat.name)
+            ok = True
+        except Exception as exc:  # pragma: no cover
+            log.warning("No pude limpiar el preview cacheado de %s: %s", dat, exc)
+    return ok
+
+
 def _model_iter(model_dir: Path) -> int:
     """Iteración actual guardada en el _data.dat del modelo (0 si no se puede leer)."""
     for dat in model_dir.glob("*_SAEHD_data.dat"):
@@ -740,6 +782,10 @@ def start(name: str) -> str:
         target = cur + (RESUME_EXTRA_ITERS if st.get("phase") == "done"
                         else AUTO_TARGET_ITERS)
     _patch_trainer_autosave()  # cinturón: reinstalaciones/updates del build
+    # cinturón: modelos preparados antes de existir el preview también lo activan
+    _patch_model_options(model, write_preview_history=True)
+    if _model_iter(model) <= 1:      # recién sembrado del RTT y aún sin entrenar
+        _reset_preview_samples(model)
     # cinturón: un .dfm dentro de model/ CONGELA el resume (workspaces viejos)
     exports = ws.parent / "exports"
     for stray in model.glob("*.dfm"):
@@ -824,6 +870,47 @@ def progress_info(name: str) -> dict:
         except Exception:
             pass
     return info
+
+
+def preview_images(name: str, limit: int = 6) -> List[tuple]:
+    """Previews del entrenamiento (del más viejo al más nuevo) como (ruta, etiqueta).
+
+    DFL escribe una imagen por autoguardado en ``<modelo>_history/<preview>/``:
+    cada una es una grilla [tu cara | reconstruida | destino | reconstruido |
+    TU CARA EN EL DESTINO]. Ver varias en orden muestra si el modelo MEJORA.
+    Devuelve [] si todavía no hay ninguna (los primeros minutos).
+    """
+    from ..core.face_library import _slug
+    model = workspace_of(_slug(name)) / "model"
+    if not model.is_dir():
+        return []
+    hist_dir = None
+    for d in sorted(model.glob("*_history")):
+        for sub in sorted(p for p in d.iterdir() if p.is_dir()):
+            # preferir el preview SIN máscara (se lee mucho mejor)
+            if "mask" not in sub.name.lower():
+                hist_dir = sub
+                break
+        if hist_dir is None and d.is_dir():
+            subs = [p for p in d.iterdir() if p.is_dir()]
+            hist_dir = subs[0] if subs else None
+        if hist_dir:
+            break
+    if hist_dir is None:
+        return []
+    shots = []
+    for f in hist_dir.glob("*.jpg"):
+        if f.stem.startswith("_"):
+            continue                       # _last.jpg duplica la última numerada
+        try:
+            shots.append((int(f.stem), f))
+        except ValueError:
+            continue
+    shots.sort()
+    if not shots:
+        last = hist_dir / "_last.jpg"
+        return [(str(last), "último")] if last.is_file() else []
+    return [(str(f), f"iter {it:,}") for it, f in shots[-max(1, limit):]]
 
 
 def stop(name: str) -> str:
