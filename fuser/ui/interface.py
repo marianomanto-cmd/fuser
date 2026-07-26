@@ -418,6 +418,14 @@ def _on_trainer_stop(cara):
         return f"⚠️ {exc}"
 
 
+def _on_trainer_tick(cara, auto):
+    """Refresco AUTOMÁTICO (temporizador). No hace nada si está desactivado o
+    si no hay modelo elegido: así el timer no pisa lo que estés mirando."""
+    if not auto or not cara:
+        return gr.update(), gr.update()
+    return _on_trainer_refresh(cara)
+
+
 def _on_trainer_refresh(cara):
     """Estado del entrenamiento + galería de previews (¿va bien el modelo?)."""
     from ..core import dfm_trainer
@@ -1737,6 +1745,12 @@ def build_interface() -> gr.Blocks:
                             cm_resume_btn = gr.Button("▶️ Retomar", variant="secondary")
                         cm_finish_btn = gr.Button("⏹️ Terminar y exportar YA", variant="stop")
                         cm_train_status = gr.Markdown("", elem_classes="fuser-soft")
+                        cm_auto = gr.Checkbox(
+                            value=True, label="🔄 Actualizar solo cada 60 s",
+                            info="Trae las últimas imágenes y el estado sin que aprietes nada. "
+                                 "DFL genera una imagen nueva cada ~5 min.",
+                        )
+                        cm_timer = gr.Timer(60.0)
                         cm_preview = gr.Gallery(
                             label="👁️ Evolución del modelo — cada imagen: [tu cara | reconstruida | "
                                   "destino | reconstruido | TU CARA EN EL DESTINO]",
@@ -1862,6 +1876,9 @@ def build_interface() -> gr.Blocks:
         )
         cm_refresh_btn.click(_on_trainer_refresh, inputs=cm_model_cara,
                              outputs=[cm_train_status, cm_preview])
+        # auto-refresco: el temporizador trae estado + previews sin apretar nada
+        cm_timer.tick(_on_trainer_tick, inputs=[cm_model_cara, cm_auto],
+                      outputs=[cm_train_status, cm_preview])
         cm_stop_btn.click(_on_trainer_stop, inputs=cm_model_cara, outputs=cm_train_status)
         cm_resume_btn.click(_on_trainer_resume, inputs=cm_model_cara, outputs=cm_train_status)
         cm_finish_btn.click(
