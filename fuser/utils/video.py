@@ -259,6 +259,34 @@ def concat_videos(paths: List[str], output: str, *, drop_seam: bool = True,
     if not ff:
         log.warning("FFmpeg no disponible: no se puede concatenar.")
         return False
+    if not drop_seam:
+        # Partes homogéneas (mismo writer, p. ej. el Montador): demuxer concat
+        # con archivo de lista. El camino filter_complex de abajo arma UN comando
+        # con -i + filtro POR PARTE: con ~230+ partes (video largo cortado de a
+        # 15 s) supera los 32.767 caracteres de CreateProcess en Windows y la
+        # unión falla SIEMPRE — tras horas de render (hallazgo de la revisión).
+        lista = Path(str(output)).with_suffix(".concat.txt")
+        try:
+            lineas = []
+            for p in paths:
+                seguro = str(Path(p).resolve()).replace("'", "'\\''")
+                lineas.append(f"file '{seguro}'")
+            lista.write_text("\n".join(lineas), encoding="utf-8")
+            cmd = [ff, "-y", "-hide_banner", "-loglevel", "error",
+                   "-f", "concat", "-safe", "0", "-i", str(lista),
+                   "-c:v", encoder, "-crf", str(crf), "-pix_fmt", "yuv420p",
+                   str(output)]
+            subprocess.run(cmd, check=True, capture_output=True)
+            return True
+        except subprocess.CalledProcessError as exc:  # pragma: no cover
+            err = (exc.stderr or b"").decode("utf-8", "ignore")
+            log.warning("Falló la concatenación (demuxer): %s", err[:500])
+            return False
+        except Exception as exc:  # pragma: no cover
+            log.warning("Falló la concatenación (demuxer): %s", exc)
+            return False
+        finally:
+            lista.unlink(missing_ok=True)
     info0 = probe(paths[0])
     w = info0.width - (info0.width % 2)
     h = info0.height - (info0.height % 2)

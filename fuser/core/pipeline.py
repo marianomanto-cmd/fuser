@@ -136,13 +136,24 @@ class SwapPipeline:
     def model_signature(self) -> tuple:
         """Identidad de los ajustes que obligan a recargar modelos/motor."""
         s = self.settings
+        # El .dfm custom entra con mtime+tamaño: re-exportar el MISMO modelo (más
+        # entrenado) cambia el archivo y debe recargar — sin esto el montaje
+        # seguía usando los pesos VIEJOS cacheados en VRAM y el usuario evaluaba
+        # horas de entrenamiento mirando el modelo anterior (hallazgo revisión).
+        dfm = getattr(s, "ff_deep_swapper_model", "") or ""
+        dfm_sig = (dfm,)
+        if dfm.startswith("custom/"):
+            from .face_library import FF_CUSTOM_DFM_DIR
+            try:
+                st = (FF_CUSTOM_DFM_DIR / (dfm.split("/", 1)[1] + ".dfm")).stat()
+                dfm_sig = (dfm, st.st_mtime_ns, st.st_size)
+            except OSError:
+                pass
         return (
             s.engine, s.ff_swapper_model, s.ff_pixel_boost,
             s.swapper_model, s.enhancer_model, s.memory_mode,
             s.force_cpu, round(s.gpu_mem_limit_gb, 2), s.det_size,
-            # El Deep Swapper carga un .dfm distinto -> cambiar de modelo debe RECARGAR
-            # (para que corra pre_check y baje/valide el .dfm).
-            getattr(s, "ff_deep_swapper_model", ""),
+            dfm_sig,
         )
 
     def update_runtime(self, settings: Settings) -> None:

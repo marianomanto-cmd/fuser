@@ -1256,7 +1256,11 @@ def export(name: str, timeout: int = 1800) -> Path:
     # exportdfm corre en CPU: sirve cualquier motor INSTALADO (preferimos el que
     # entrenó este modelo; si no está, el activo o el primero disponible).
     be = _read_state(slug).get("backend")
-    if not backend_ready(be or ""):
+    # OJO: exigir be ∈ BACKENDS ademas de ready. backend_ready("") devuelve True
+    # (resuelve las rutas del motor default), asi que un state viejo SIN campo
+    # backend pasaba el guard con be=None y reventaba mas abajo con el error
+    # engañoso "no hay ningún motor instalado" (medido 2026-07-26, prueba_stock).
+    if be not in BACKENDS or not backend_ready(be):
         be = active_backend() if backend_ready(active_backend()) else \
             next((b for b in BACKENDS if backend_ready(b)), None)
     if be is None:

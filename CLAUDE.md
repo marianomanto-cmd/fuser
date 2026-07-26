@@ -6,13 +6,21 @@ Lee también `INSTALL.md` (instalación) y `README.md` (uso y diseño).
 ## Qué es
 **Fuser**: app web local (Gradio) cuya **única** función es **face swap de vídeo** de alta calidad,
 optimizada para **8 GB de VRAM NVIDIA + 40 GB de RAM** y afinada para **caras cantando en videos
-musicales**. Dos pestañas:
+musicales**. Tres pestañas:
 - **🎭 Face Swap** (one-shot): Cara guardada/fotos + video + preset (🎯 Máxima Identidad, 🎯➕ PRO,
   🔥 MÁXIMO…). Motor FaceFusion vendorizado.
-- **🧬 Deep Swap**: crea un **modelo `.dfm` por-persona** con un botón (videos de la persona →
+- **🧬 Deep Swap**: SOLO crea el **modelo `.dfm` por-persona** con un botón (videos de la persona →
   curado → síntesis si falta material → **entrenamiento local** DeepFaceLab DirectX12 en segundo
-  plano → autopiloto exporta/registra) y lo monta en videos desde la misma pestaña.
+  plano → autopiloto exporta/registra) + seguimiento/pausa/export/import.
   Código: `fuser/core/dfm_trainer.py`, `faceset.py`, `faceset_synth.py`, `face_library.py`.
+- **🎬 Montador** (`fuser/ui/montador.py`, reescrito de cero 2026-07-26): monta un `.dfm` en 1..N
+  videos (misma cola), por partes con preview en vivo, reanudable, con Detener-y-guardar. Presets:
+  Máxima Identidad (final) / Estándar (test). Plumbing compartido con interface.py en
+  `fuser/ui/shared.py` (caché única del pipeline, guarda GPU-ocupada, semáforo de fondo).
+  La pestaña CUDA fue ELIMINADA (callejón sin salida en esta GPU; el backend `cuda` sigue en
+  `dfm_trainer` por si aparece un build compatible). REGLA: montar con un entrenamiento DFL vivo
+  mata el proceso (VRAM llena, DirectML no lanza excepción) — por eso `ensure_gpu_libre` corta
+  ANTES en todas las acciones de GPU.
 
 ## Hardware objetivo (y VERDADES de esta máquina — leer antes de tocar nada)
 - GPU NVIDIA 8 GB VRAM, 40 GB RAM. En ESTA máquina: **DirectML** (onnxruntime-directml 1.24.4;

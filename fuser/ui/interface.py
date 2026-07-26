@@ -14,7 +14,6 @@ Gradio + CSS custom (ver ``CUSTOM_CSS``), sin tocar la lógica ni el wiring.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -34,11 +33,14 @@ from ..core.pipeline import SwapPipeline
 from ..utils import video as videoutil
 from ..utils.logging import get_logger
 from ..utils.system import format_system_summary
+from . import montador
+from .shared import (PIPELINE_CACHE as _PIPELINE_CACHE, NO_DFM,
+                     bg_status_md as _bg_status_md,
+                     dfm_choices as _dfm_choices,
+                     ensure_gpu_libre as _ensure_gpu_libre,
+                     get_pipeline as _get_pipeline)
 
 log = get_logger(__name__)
-
-_PIPELINE_CACHE: dict = {"pipeline": None, "signature": None}
-
 
 def free_swap_vram() -> None:
     """Descarga el pipeline de swap cacheado y libera su VRAM.
@@ -69,53 +71,7 @@ def free_swap_vram() -> None:
 QUEUE_MAX_ATTEMPTS = 2
 
 
-def _bg_status_md() -> str:
-    """🚦 Semáforo de procesos de fondo, siempre visible en la cabecera.
-
-    Muestra si hay un entrenamiento DFL vivo (son subprocesos desacoplados:
-    sobreviven a cierres/reinicios de la app, así que es fácil olvidar que
-    existen — y con la GPU tomada, montar tira abajo la app). Lo refresca un
-    gr.Timer; una sola consulta barrida a Windows por tick (_live_train_pids).
-    """
-    from ..core import dfm_trainer
-    try:
-        vivos = dfm_trainer.running_trainings()
-    except Exception as exc:  # pragma: no cover
-        return f"⚠️ No pude consultar los procesos de fondo: {exc}"
-    if vivos:
-        nombres = ", ".join(f"«{n}»" for n in vivos)
-        return (f"🔴 **Fondo: ENTRENANDO a {nombres}** — la GPU está tomada "
-                f"(~7,6/8,2 GB). ⏸️ Pausá antes de montar o la app se cae.")
-    return "🟢 **Fondo: GPU libre** — sin entrenamientos corriendo; podés montar."
-
-
-def _ensure_gpu_libre(accion: str = "el montaje") -> None:
-    """Bloquea las acciones de GPU (montaje/preview/cola) si hay un entrenamiento vivo.
-
-    Con el optimizador en GPU, un entrenamiento DFL ocupa ~7,6 de los 8,2 GB de
-    VRAM. Si en ese estado se intenta un swap, DirectML no puede reservar memoria
-    al cargar los modelos y MATA EL PROCESO ENTERO sin excepción de Python — el
-    usuario ve "Broken Connection" y la app muerta (pasó 2026-07-26, dos veces,
-    con el crash capturado justo en la carga del detector). Mejor un mensaje
-    claro ANTES de tocar la GPU.
-    """
-    from ..core import dfm_trainer
-    try:
-        vivos = dfm_trainer.running_trainings()
-    except Exception:
-        vivos = []
-    if vivos:
-        raise gr.Error(
-            f"La GPU está entrenando a «{vivos[0]}» (usa casi toda la VRAM) y "
-            f"lanzar {accion} en ese estado tira abajo la app entera. "
-            f"Pausá el entrenamiento (⏸️ en su pestaña), hacé {accion}, y "
-            f"retomalo después: el autoguardado cada 5 min hace que pierdas "
-            f"minutos, no horas.")
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# _bg_status_md / _ensure_gpu_libre viven en ui/shared.py (compartidos con el Montador).
 def _read_image(path: str) -> Optional[np.ndarray]:
     return cv2.imread(path, cv2.IMREAD_COLOR)
 
@@ -188,19 +144,6 @@ def _build_settings(
     return s
 
 
-def _get_pipeline(settings: config.Settings, progress=None) -> SwapPipeline:
-    pipeline = SwapPipeline(settings)
-    signature = pipeline.model_signature()
-    cached = _PIPELINE_CACHE["pipeline"]
-    if cached is not None and _PIPELINE_CACHE["signature"] == signature:
-        cached.update_runtime(settings)
-        return cached
-    pipeline.load_models(progress=progress)
-    _PIPELINE_CACHE["pipeline"] = pipeline
-    _PIPELINE_CACHE["signature"] = signature
-    return pipeline
-
-
 # Valor "sin cara guardada" del desplegable de la Biblioteca de Caras.
 NO_FACE = "— subir fotos —"
 
@@ -222,29 +165,6 @@ def _resolve_source_paths(source_files, face_choice) -> List[str]:
         p = f if isinstance(f, str) else getattr(f, "name", None)
         if p:
             out.append(p)
-    return out
-
-
-# Valor "sin modelo entrenado" del desplegable de Deep Swap en Face Swap.
-NO_DFM = "— sin modelo (one-shot con fotos) —"
-
-
-def _dfm_choices() -> list:
-    """Modelos .dfm disponibles para el desplegable de Face Swap."""
-    out = [NO_DFM]
-    seen = set()
-    for n in face_library.list_faces():
-        mid = face_library.dfm_of(n)
-        if mid:
-            out.append((f"🧬 {n}", mid))
-            seen.add(mid)
-    try:
-        for f in sorted(face_library.FF_CUSTOM_DFM_DIR.glob("*.dfm")):
-            mid = f"custom/{f.stem}"
-            if mid not in seen:
-                out.append((f"🧬 {f.stem}", mid))
-    except Exception:
-        pass
     return out
 
 
@@ -345,41 +265,7 @@ def _on_trainer_resume(cara):
         return f"⚠️ {exc}"
 
 
-# --- Pestaña CUDA: mismas acciones, motor forzado a "cuda" ---------------------
-def _on_create_dfm_cuda(name, files, person_videos, dst_videos, progress=gr.Progress()):
-    return _on_create_dfm(name, files, person_videos, dst_videos, progress, backend="cuda")
-
-
-def _on_resume_cuda(cara):
-    """▶️ Retomar CON CUDA. Si el build se cuelga, el modelo queda intacto:
-    volvés a la pestaña 🧬 Deep Swap y retomás con DirectX12."""
-    from ..core import dfm_trainer
-    if not cara:
-        return "⚠️ Elegí el modelo."
-    try:
-        if not dfm_trainer.backend_ready("cuda"):
-            return "⚠️ El motor CUDA no está instalado (usá «Instalar motor CUDA»)."
-        msg = dfm_trainer.start(cara, backend="cuda")
-    except Exception as exc:
-        return f"⚠️ {exc}"
-    return (f"{msg}\n\n⏳ **Esperá 2-3 minutos y mirá el estado**: si las iteraciones "
-            f"empiezan a subir, CUDA funciona 🎉. Si se queda clavado en 0 (el log frena "
-            f"en «Sort by yaw»), es el freeze conocido: apretá **⏸️ Pausar**, andá a "
-            f"**🧬 Deep Swap** y retomá ahí con DirectX12 — el modelo no se toca.")
-
-
-def _on_install_cuda_engine(progress=gr.Progress()):
-    from ..core import dfm_trainer
-    try:
-        progress(0.01, desc="Instalando el motor CUDA (se reanuda si se corta)…")
-        msg = dfm_trainer.install(progress=lambda f, m="": progress(min(f, 0.99), desc=m),
-                                  backend="cuda")
-    except Exception as exc:
-        log.exception("Instalación de CUDA falló")
-        return f"⚠️ {exc}"
-    return f"{msg}\n\n{_cuda_status_md()}"
-
-
+# --- Curado del faceset + creacion del modelo -----------------------------------
 def _curate_and_create_face(name, files, progress, frac0=0.0, frac1=0.3,
                             person_videos=None):
     """Cura fotos + frames de los VIDEOS DE LA PERSONA, crea la Cara.
@@ -653,491 +539,6 @@ def _on_finish_export(cara, progress=gr.Progress()):
         return f"⚠️ {exc}", gr.update()
     return (f"{msg}\n\n🎉 **Reiniciá Fuser** y elegilo en el desplegable «🧬 Modelo» para montar.",
             gr.update(choices=_dfm_choices()))
-
-
-def _deepswap_settings(dfm_id: str, mode: str) -> config.Settings:
-    """Settings del montaje con .dfm: preset de calidad + VRAM/RAM al máximo."""
-    s = config.Settings()
-    preset = config.EXPRESSION_PRESETS.get(mode, config.EXPRESSION_PRESETS[config.EXPR_MAXIDENTITY])
-    for k, v in preset.items():
-        setattr(s, k, v)
-    s.expression_mode = mode
-    s.chain_shape_then_texture = False          # el .dfm ya es forma+textura
-    s.ff_deep_swapper_model = dfm_id
-    s.skin_detail = 0.0                          # no reinyectar textura del video
-    # En perfiles, el blending de bordes mezcla mandíbula/oreja de vuelta hacia
-    # el VIDEO (default 0.5) — con un .dfm eso deshace justo la geometría que el
-    # modelo aprendió a imponer. La máscara box con blur ya funde los bordes.
-    s.profile_blending_strength = 0.0
-    s.ram_mode = config.RAM_MAX                  # 40 GB de RAM al servicio del swap
-    s.memory_mode = config.MODE_MAX_QUALITY      # arena de VRAM grande
-    s.gpu_mem_limit_gb = config.MEMORY_PRESETS[config.MODE_MAX_QUALITY]["gpu_mem_limit_gb"]
-    s.output_quality = 12                        # CRF: calidad de salida alta
-    return s
-
-
-def _video_fingerprint(video_path: str) -> str:
-    """Huella corta y estable de un archivo de video (ruta + tamaño + mtime).
-
-    No lee el contenido (un video de 1 GB tardaría una eternidad): con esos tres
-    datos alcanza para que dos videos DISTINTOS nunca compartan carpeta de
-    trabajo, que es lo único que hace falta aquí.
-    """
-    p = Path(video_path)
-    try:
-        st = p.stat()
-        raw = f"{p.resolve()}|{st.st_size}|{int(st.st_mtime)}"
-    except OSError:
-        raw = str(p)
-    return hashlib.sha1(raw.encode("utf-8", "surrogateescape")).hexdigest()[:10]
-
-
-def _part_is_complete(path: Path) -> bool:
-    """True si la parte del disco es un video TERMINADO y legible.
-
-    El chequeo anterior era ``tamaño > 1000`` bytes: un mp4 truncado (la app se
-    cayó a mitad de escribir la parte) pesa muchísimo más que eso y se daba por
-    bueno para siempre — al reanudar se saltaba esa parte y el video final salía
-    con un hueco. Abrimos el archivo y exigimos frames de verdad.
-    """
-    try:
-        if not path.is_file() or path.stat().st_size <= 1000:
-            return False
-        cap = cv2.VideoCapture(str(path))
-        try:
-            return bool(cap.isOpened()) and int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) > 0
-        finally:
-            cap.release()
-    except Exception:
-        return False
-
-
-def _split_into_chunks(video_path: str, secs: int, out_dir: Path) -> List[Path]:
-    """Corta el video en partes de ``secs`` con UNA pasada de ffmpeg (segment).
-
-    Reencoda para que los cortes sean exactos (no depende de keyframes) y
-    conserva el audio de cada parte.
-
-    Reusa lo ya cortado **solo si el manifiesto coincide** (mismo video y mismo
-    tamaño de parte). Antes se reusaba cualquier ``in_*.mp4`` que hubiera en la
-    carpeta: pedir 60 s donde antes se pidieron 30 —o mandar otro video que
-    cayera en la misma carpeta— devolvía los tramos VIEJOS, y el montaje seguía
-    un trabajo anterior en vez de empezar el nuevo.
-    """
-    import subprocess
-
-    from ..utils.system import ffmpeg_path
-
-    ff = ffmpeg_path()
-    if not ff:
-        raise gr.Error("FFmpeg no disponible.")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = out_dir / "corte.json"
-    want = {"huella": _video_fingerprint(video_path), "secs": int(secs)}
-    existing = sorted(out_dir.glob("in_*.mp4"))
-    if existing:
-        try:
-            if json.loads(manifest.read_text("utf-8")) == want:
-                return existing
-        except Exception:
-            pass
-        for stale in existing:      # el corte guardado es de otro trabajo: no sirve
-            stale.unlink(missing_ok=True)
-    # -force_key_frames: sin esto el muxer 'segment' solo corta en los keyframes
-    # QUE YA TRAE el video (medido: pedir 3 s daba partes de 8 s). Forzamos un
-    # keyframe exacto cada `secs` para que las partes salgan del tamaño pedido.
-    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", video_path,
-           "-c:v", "libx264", "-crf", "16", "-preset", "veryfast",
-           "-force_key_frames", f"expr:gte(t,n_forced*{int(secs)})",
-           "-c:a", "aac", "-reset_timestamps", "1",
-           "-f", "segment", "-segment_time", str(int(secs)),
-           "-segment_time_delta", "0.05",
-           str(out_dir / "in_%04d.mp4")]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
-    except subprocess.CalledProcessError as exc:
-        err = (exc.stderr or b"").decode("utf-8", "ignore")[-300:]
-        raise gr.Error(f"FFmpeg falló al cortar el video: {err}")
-    parts = sorted(out_dir.glob("in_*.mp4"))
-    if not parts:
-        raise gr.Error("El corte no produjo partes (¿video ilegible?).")
-    manifest.write_text(json.dumps(want), "utf-8")
-    return parts
-
-
-def _fmt_eta(secs: float) -> str:
-    secs = int(max(0, secs))
-    h, m = secs // 3600, (secs % 3600) // 60
-    return f"{h} h {m:02d} min" if h else f"{m} min"
-
-
-def _cuda_status_md() -> str:
-    """Estado de los dos motores de entrenamiento (pestaña DeepFace CUDA)."""
-    from ..core import dfm_trainer
-    try:
-        st = dfm_trainer.backends_status()
-    except Exception as exc:
-        return f"⚠️ {exc}"
-    lines = []
-    for b, info in st["backends"].items():
-        mark = "instalado" if info["ready"] else "no instalado"
-        act = " · ✅ **EN USO**" if b == st["active"] else ""
-        lines.append(f"- **{info['label']}** — {mark}{act}")
-    return "**Estado actual:**\n" + "\n".join(lines)
-
-
-# Resultado de la prueba de CUDA hecha en esta máquina (2026-07-25): el build
-# NVIDIA disponible es de 2021 y esta placa es Ada -> se cuelga tras cargar los
-# datos, sin error. Se documenta en la UI para no invitar a repetir el intento.
-CUDA_VERDICT_MD = """
-### ❌ En esta placa, CUDA no funciona (ya lo probamos)
-
-La RTX 4060 Ti es arquitectura **Ada**; el único build NVIDIA de DeepFaceLab que
-existe es de **2021** y no la soporta: arranca, carga las muestras y se **cuelga
-sin dar ningún error**. Es un problema conocido de ese build, no de tu equipo.
-
-**No tenés que hacer nada acá.** El motor **DirectX12** ya está activo y es el que
-usa tu entrenamiento: más lento (~3,5 s por iteración) pero estable.
-
-*Esta pestaña queda por si en el futuro sale un build nuevo de DeepFaceLab que sí
-soporte Ada — ahí valdría la pena reintentar.*
-"""
-
-
-def _on_install_cuda(progress=gr.Progress()):
-    from ..core import dfm_trainer
-    try:
-        progress(0.01, desc="Descargando el motor CUDA (3,7 GB, se reanuda si se corta)…")
-        msg = dfm_trainer.install(progress=lambda f, m="": progress(min(f, 0.99), desc=m),
-                                  backend="cuda")
-    except Exception as exc:
-        log.exception("Instalación de CUDA falló")
-        return f"⚠️ {exc}\n\n{_cuda_status_md()}"
-    return f"{msg}\n\n{_cuda_status_md()}\n\nAhora probalo con **🧪 Probar CUDA**."
-
-
-def _on_test_cuda(progress=gr.Progress()):
-    """Prueba si el motor CUDA entrena en esta GPU (usa el workspace de stock)."""
-    from ..core import dfm_trainer
-    try:
-        res = dfm_trainer.test_backend(
-            "cuda", progress=lambda f, m="": progress(f, desc=m))
-    except Exception as exc:
-        log.exception("Test de CUDA falló")
-        return f"⚠️ {exc}\n\n{_cuda_status_md()}"
-    if res["ok"]:
-        ms = res.get("ms_iter")
-        comp = ""
-        if ms:
-            comp = (f"\n\n⚡ **{ms} ms por iteración**. El DirectX12 anda por ~3.500 ms: "
-                    f"si este número es bastante menor, te conviene cambiar de motor "
-                    f"(un entrenamiento de 19 días podría bajar a ~{max(1, round(19*ms/3500))} días).")
-        return (f"### ✅ CUDA FUNCIONA en esta placa\n\n{res['detail']} "
-                f"Llegó a {res['iters']} iteraciones.{comp}\n\n"
-                f"Para usarlo: elegí **NVIDIA CUDA** abajo y arrancá (o retomá) un "
-                f"entrenamiento.\n\n{_cuda_status_md()}")
-    return (f"### ❌ CUDA no funciona acá\n\n{res['detail']}\n\n"
-            f"Es el problema esperado: el build es de 2021 y esta placa es más nueva. "
-            f"Seguimos con **DirectX12**, que es más lento pero anda seguro.\n\n"
-            f"{_cuda_status_md()}")
-
-
-def _on_set_backend(choice):
-    from ..core import dfm_trainer
-    try:
-        label = dfm_trainer.set_active_backend(choice)
-    except Exception as exc:
-        return f"⚠️ {exc}\n\n{_cuda_status_md()}"
-    return (f"✅ Motor activo: **{label}**. Se usa en el próximo entrenamiento que "
-            f"arranques o retomes (los modelos ya entrenados siguen sirviendo: los "
-            f"pesos no dependen del motor).\n\n{_cuda_status_md()}")
-
-
-def _deepswap_job_dir(dfm_id: str, video_path: str, secs: int) -> Path:
-    """Carpeta de trabajo de UN montaje (partes de entrada y partes listas).
-
-    La clave incluye la HUELLA del video y el tamaño de parte, así que dos
-    trabajos distintos nunca comparten carpeta. Antes la clave era solo
-    (modelo, nombre del archivo recortado a 40 caracteres): mandar otro video de
-    nombre parecido —o el mismo video con otro tamaño de parte— caía en la
-    carpeta del trabajo anterior y el montaje lo *reanudaba*, escupiendo la
-    parte 2 de un corte viejo en vez de empezar el nuevo desde cero.
-    """
-    stem = Path(video_path).stem[:40]
-    tag = f"c{int(secs)}" if int(secs) > 0 else "entero"
-    return config.OUTPUTS_DIR / (
-        f"deepswap_{face_library._slug(dfm_id.split('/')[-1])}_{stem}"
-        f"_{_video_fingerprint(video_path)}_{tag}"
-    )
-
-
-def _join_parts(parts: List[str], out_stem: str, audio_from: str) -> Optional[str]:
-    """Une las partes en un solo mp4 en ``outputs/`` y le pega el audio original."""
-    if not parts:
-        return None
-    final = str(config.OUTPUTS_DIR / f"{out_stem}.mp4")
-    if not videoutil.concat_videos(parts, final, drop_seam=False, crf=12):
-        return None
-    try:
-        with_audio = str(config.OUTPUTS_DIR / f"{out_stem}_audio.mp4")
-        if videoutil.mux_audio(final, audio_from, with_audio):
-            return with_audio
-    except Exception:
-        log.warning("No pude remuxear el audio original", exc_info=True)
-    return final
-
-
-def _deepswap_montage(pipeline, dfm_id, video_path, secs, progress,
-                      *, label: str = "", base: float = 0.0, span: float = 1.0):
-    """Monta la cara del .dfm en UN video, parte por parte.
-
-    Generator: emite ``(última parte, archivos, estado)`` y **devuelve** la ruta
-    del video final (o del parcial si se detuvo, o None si no salió nada). Lo
-    usan tanto el botón de un video como la cola; ``base``/``span`` sitúan su
-    progreso dentro de una barra más grande (la de la cola).
-
-    Reanudable de verdad: cada parte se escribe en un temporal y solo se publica
-    con su nombre definitivo cuando terminó entera, así una parte a medias nunca
-    se confunde con una terminada.
-    """
-    import gc
-    import time as _t
-
-    stem = Path(video_path).stem[:40]
-    work = _deepswap_job_dir(dfm_id, video_path, secs)
-    parts_in = work / "partes_entrada"
-    parts_out = work / "partes_listas"
-    parts_out.mkdir(parents=True, exist_ok=True)
-
-    def bar(frac, desc):
-        progress(base + span * min(max(frac, 0.0), 1.0), desc=f"{label}{desc}")
-
-    if int(secs) <= 0:
-        chunks = [Path(video_path)]              # "video entero": una sola parte
-    else:
-        bar(0.01, "Cortando el video en partes…")
-        chunks = _split_into_chunks(video_path, int(secs), parts_in)
-    n = len(chunks)
-
-    _prepare(pipeline, None, str(chunks[0]), None)
-
-    done: list = []
-    spent = 0.0                      # tiempo real gastado (sin contar las salteadas)
-    computed = 0
-    cabecera = (f"▶️ **{n} partes** de {int(secs)} s. Procesando…" if int(secs) > 0
-                else "▶️ **Video entero** (sin partes). Procesando…")
-    yield None, [], f"{label}{cabecera}"
-
-    parcial: Optional[str] = None    # parte cortada a mitad por el botón de detener
-    for i, ch in enumerate(chunks):
-        out_path = parts_out / f"parte_{i + 1:04d}.mp4"
-        if _part_is_complete(out_path):
-            done.append(str(out_path))          # reanudación: ya estaba hecha
-            yield str(out_path), list(done), (
-                f"{label}⏩ Parte **{i + 1}/{n}** ya estaba lista (reanudando)…")
-            continue
-        if pipeline_core.stop_requested():
-            break
-
-        def cb(frac, msg="", _i=i):
-            bar(0.08 + 0.87 * (_i + frac) / n, f"Parte {_i + 1}/{n} · {msg}")
-
-        # Se renderiza a un temporal y se publica de una sola vez: si el proceso
-        # muere a mitad, queda el temporal (que se descarta), nunca una parte
-        # trunca haciéndose pasar por terminada.
-        tmp_out = parts_out / f"parte_{i + 1:04d}.enproceso.mp4"
-        tmp_out.unlink(missing_ok=True)
-        t_chunk = _t.time()
-        try:
-            pipeline.process_video(str(ch), output_path=str(tmp_out), progress=cb)
-        except Exception as exc:
-            tmp_out.unlink(missing_ok=True)
-            log.exception("Deep swap: falló la parte %d/%d", i + 1, n)
-            yield (done[-1] if done else None), list(done), (
-                f"{label}⚠️ La parte **{i + 1}/{n}** falló: {exc}\n\n"
-                f"Las **{len(done)}** partes anteriores quedaron guardadas. Volvé a darle "
-                f"al botón y retoma desde esta parte.")
-            return None
-        spent += _t.time() - t_chunk
-
-        if pipeline.interrupted:
-            # Parte cortada a mitad: sirve para entregarla ahora, pero NO se
-            # publica como terminada (al retomar hay que rehacerla entera).
-            parcial = str(tmp_out.with_name(f"parte_{i + 1:04d}.parcial.mp4"))
-            os.replace(tmp_out, parcial)
-            break
-
-        os.replace(tmp_out, out_path)           # publicación atómica de la parte
-        # si esta parte venía de una parada anterior, su recorte ya no hace falta
-        out_path.with_name(f"parte_{i + 1:04d}.parcial.mp4").unlink(missing_ok=True)
-        computed += 1
-        done.append(str(out_path))
-        gc.collect()                            # suelta los buffers de la parte
-
-        per = spent / max(1, computed)
-        eta = per * (n - i - 1)
-        yield str(out_path), list(done), (
-            f"{label}✅ Parte **{i + 1}/{n}** lista — miralá arriba para controlar la calidad.\n\n"
-            f"⏱️ {_fmt_eta(per)} por parte · faltan **{_fmt_eta(eta)}** ({n - i - 1} partes).\n\n"
-            f"*Podés frenar cuando quieras: lo hecho queda guardado y al volver a darle "
-            f"continúa desde acá.*")
-
-    detenido = pipeline_core.stop_requested()
-    # Si la parada llegó tan temprano que el recorte no llegó a tener frames, no
-    # sirve para unir (rompería el concat): se descarta y se entrega lo anterior.
-    if parcial and not _part_is_complete(Path(parcial)):
-        Path(parcial).unlink(missing_ok=True)
-        parcial = None
-    piezas = done + ([parcial] if parcial else [])
-    if detenido:
-        bar(0.99, "Guardando lo procesado…")
-        final = _join_parts(piezas, f"{stem}_deepswap_PARCIAL", video_path)
-        hechas = len(done) + (1 if parcial else 0)
-        if final:
-            yield final, piezas + [final], (
-                f"{label}⏹️ **Detenido.** Guardé el video hasta donde llegó "
-                f"({hechas} de {n} partes) en `{final}`.\n\n"
-                f"*Volvé a darle a montar y sigue desde la parte {len(done) + 1}.*")
-        else:
-            yield (piezas[-1] if piezas else None), piezas, (
-                f"{label}⏹️ **Detenido** con {hechas} de {n} partes hechas. La unión no salió; "
-                f"las partes sueltas están en `{parts_out}`.")
-        return final
-
-    bar(0.96, "Uniendo las partes…")
-    final = _join_parts(done, f"{stem}_deepswap", video_path)
-    if final:
-        yield final, done + [final], (
-            f"{label}🎉 **Video completo listo** ({n} partes unidas · "
-            f"{_fmt_eta(spent)} de proceso).\n\nLas partes sueltas quedan en `{parts_out}`.")
-    else:
-        yield (done[-1] if done else None), done, (
-            f"{label}⚠️ Las {n} partes están listas pero la unión falló. "
-            f"Las tenés todas en `{parts_out}` (podés unirlas a mano).")
-    return final
-
-
-def _on_deepswap_process(dfm_id, video_path, mode, chunk_secs, progress=gr.Progress()):
-    """🎬 Montar la cara del modelo .dfm — POR PARTES, con vista en vivo.
-
-    Es un *generator*: corta el video en tramos de ``chunk_secs`` y va emitiendo
-    CADA parte terminada para que puedas verla y controlar la calidad sin esperar
-    el video entero (un 10 min a máxima calidad son horas). Al final une todo.
-
-    Reanudable: las partes ya procesadas se saltean, así que si parás y volvés a
-    darle, sigue donde quedó. VRAM/RAM al máximo (ver _deepswap_settings); el
-    modelo se carga UNA sola vez para todas las partes.
-    """
-    if not dfm_id or dfm_id == NO_DFM:
-        raise gr.Error("Elegí un modelo .dfm (crealo arriba, o importalo).")
-    if not video_path:
-        raise gr.Error("Subí el video donde montar la cara.")
-    _ensure_gpu_libre("el montaje")
-
-    pipeline_core.clear_stop()
-    s = _deepswap_settings(dfm_id, mode)
-    try:
-        progress(0.02, desc="Cargando el modelo entrenado…")
-        pipeline = _get_pipeline(s, progress=lambda f, m="": progress(0.02 + f * 0.05, desc=m))
-        yield from _deepswap_montage(pipeline, dfm_id, video_path, int(chunk_secs or 0),
-                                     progress, base=0.07, span=0.93)
-    except gr.Error:
-        raise
-    except Exception as exc:  # pragma: no cover
-        log.exception("Deep swap falló")
-        raise gr.Error(f"Error al montar: {exc}")
-
-
-def _on_deepswap_queue(dfm_id, video_queue, mode, chunk_secs, progress=gr.Progress()):
-    """⏭️ Monta el MISMO modelo .dfm en una COLA de videos, uno tras otro.
-
-    Mismo criterio que la cola de Face Swap (``_on_process_queue``): el modelo se
-    carga una sola vez, la cola va del video más corto al más largo, cada
-    resultado aparece en cuanto termina y un video que falla se manda al final
-    para reintentarlo (hasta ``QUEUE_MAX_ATTEMPTS``). Cada video se monta por
-    partes, así que el botón de detener también corta acá.
-    """
-    if not dfm_id or dfm_id == NO_DFM:
-        raise gr.Error("Elegí un modelo .dfm (crealo arriba, o importalo).")
-    videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (video_queue or [])]
-    videos = [v for v in videos if v]
-    if not videos:
-        raise gr.Error("Agregá al menos un video a la cola.")
-    _ensure_gpu_libre("la cola de montajes")
-
-    pipeline_core.clear_stop()
-    s = _deepswap_settings(dfm_id, mode)
-    progress(0.0, desc="Cargando el modelo entrenado…")
-    pipeline = _get_pipeline(s, progress=lambda f, m="": progress(f * 0.05, desc=m))
-
-    videos = sorted(videos, key=_queue_duration_seconds)   # victorias rápidas primero
-    n = len(videos)
-    work = deque((v, 1) for v in videos)                   # (ruta, nº de intento)
-    listos: list = []
-    descartados: list = []
-    yield None, [], f"▶️ Cola de **{n}** videos (de más corto a más largo). Procesando…"
-
-    while work:
-        if pipeline_core.stop_requested():
-            break
-        vpath, attempt = work.popleft()
-        hechos = len(listos) + len(descartados)
-        etiqueta = f"[{hechos + 1}/{n}] **{Path(vpath).name}** · "
-        montaje = _deepswap_montage(
-            pipeline, dfm_id, vpath, int(chunk_secs or 0), progress,
-            label=etiqueta, base=0.05 + 0.95 * hechos / n, span=0.95 / n)
-        final = None
-        try:
-            # Se reemiten los avances del montaje SIN perder los videos ya
-            # terminados de la cola: la lista de descargas siempre los muestra.
-            while True:
-                vid, piezas, estado = next(montaje)
-                yield vid, list(listos) + list(piezas), estado
-        except StopIteration as fin:
-            final = fin.value
-        except Exception:  # pragma: no cover
-            # Incluye gr.Error (video ilegible, ffmpeg): un video malo se trata
-            # como fallo de ESE item, no tumba la cola entera.
-            log.exception("Cola deep swap: falló %s (intento %d)", vpath, attempt)
-        if pipeline_core.stop_requested():
-            if final:
-                listos.append(final)
-            break
-        if final:
-            listos.append(final)
-            yield final, list(listos), (
-                f"✅ {len(listos)}/{n} listos · terminé **{Path(vpath).name}**. Sigo…")
-        elif attempt < QUEUE_MAX_ATTEMPTS:
-            work.append((vpath, attempt + 1))       # al final de la cola, se reintenta luego
-            yield (listos[-1] if listos else None), list(listos), (
-                f"⚠️ Falló **{Path(vpath).name}**; lo mando al final de la cola "
-                f"(intento {attempt + 1}/{QUEUE_MAX_ATTEMPTS})…")
-        else:
-            descartados.append(Path(vpath).name)
-            yield (listos[-1] if listos else None), list(listos), (
-                f"❌ **{Path(vpath).name}** falló {QUEUE_MAX_ATTEMPTS} veces; lo descarto. Sigo…")
-
-    cola = f" · quedaron {len(work)} sin empezar" if work else ""
-    tail = f" · descartados ({len(descartados)}): {', '.join(descartados)}" if descartados else ""
-    if pipeline_core.stop_requested():
-        yield (listos[-1] if listos else None), list(listos), (
-            f"⏹️ **Cola detenida** con **{len(listos)}/{n}** videos guardados en `outputs/`"
-            f"{cola}. Volvé a darle a la cola y retoma donde quedó.")
-    else:
-        yield (listos[-1] if listos else None), list(listos), (
-            f"✅ Cola completa: **{len(listos)}/{n}** videos listos{tail}. Descargalos abajo.")
-
-
-def _on_deepswap_stop():
-    """⏹️ Detiene el montaje en curso y guarda el video hasta donde llegó.
-
-    Solo levanta la bandera: el bucle de frames la ve en el frame siguiente, sale
-    limpio, cierra bien el mp4 y el montaje une y guarda en ``outputs/`` lo
-    procesado. No mata nada, así que no se pierde ni una parte terminada.
-    """
-    pipeline_core.request_stop()
-    return ("⏹️ **Deteniendo…** termino el frame en curso, uno lo que ya está hecho y lo "
-            "guardo en `outputs/`. Puede tardar unos segundos.")
 
 
 def _on_save_face(name, files):
@@ -1431,6 +832,10 @@ def _on_maximum_swap(source_files, face_choice, dfm_choice, video_path, progress
     pasada temporal + QC de defectos. Devuelve además un ANTES/DESPUÉS del frame
     central y registra los ajustes exactos (reproducibilidad).
     """
+    # Era la ÚNICA acción de GPU sin la guarda ni el clear_stop (hallazgo de la
+    # revisión): con un entrenamiento vivo mataba la app igual que el montaje.
+    pipeline_core.clear_stop()
+    _ensure_gpu_libre("el MAXIMUM SWAP")
     settings = _max_settings()
     _apply_dfm(settings, face_choice, dfm_choice)
     try:
@@ -2152,12 +1557,11 @@ def build_interface() -> gr.Blocks:
                                     label="⬇️ Partes (también quedan en la carpeta chunks/)")
             with gr.Tab("🧬 Deep Swap — modelo entrenado (.dfm)"):
                 gr.Markdown(
-                    "**Todo el flujo Deep Swap en un lugar**: ① creá el **modelo** de la persona con "
-                    "tus **videos** (ideal: ~60 clips de ~6 s con movimientos/ángulos variados — de ahí "
-                    "salen miles de frames reales y el dataset se arma 100% con TU material) · ② montá "
-                    "la cara en cualquier **video** con el preset de calidad que quieras. El "
-                    "entrenamiento corre en tu GPU en segundo plano (días; el autopiloto exporta solo) "
-                    "y todo el pipeline exprime **VRAM + RAM** (40 GB) al máximo."
+                    "**Acá se CREA el modelo** de la persona con tus **videos** (ideal: ~60 clips "
+                    "de ~6 s con movimientos/ángulos variados — de ahí salen miles de frames reales "
+                    "y el dataset se arma 100% con TU material). El entrenamiento corre en tu GPU en "
+                    "segundo plano (días; el autopiloto exporta solo). **Para montar el modelo en un "
+                    "video, andá a la pestaña 🎬 Montador.**"
                 )
                 with gr.Row():
                     with gr.Column():
@@ -2212,124 +1616,15 @@ def build_interface() -> gr.Blocks:
                         cm_import_status = gr.Markdown(_dfm_library_status(), elem_classes="fuser-soft")
                     with gr.Column():
                         gr.Markdown("#### ② Montar la cara en un video")
-                        ds_dfm_choice = gr.Dropdown(
-                            choices=_dfm_choices(), value=NO_DFM, label="🧬 Modelo",
-                            info="El modelo entrenado a usar (aparece al terminar/exportar + reiniciar).",
-                        )
-                        ds_video = gr.Video(label="🎬 Video donde montar la cara")
-                        # Con .dfm solo tienen sentido DOS presets: la identidad vive en el
-                        # modelo, así que el preset solo decide cómo se PEGA la cara. Máxima
-                        # Identidad (máscara BOX: respeta la geometría entrenada) para el
-                        # render final; Estándar (1 pasada, sin QC) para testear rápido. Los
-                        # demás recortan la geometría del modelo (máscara hull/parser) o
-                        # reinyectan rasgos del video (ojos/piel) — contraproducentes acá.
-                        ds_mode = gr.Dropdown(
-                            choices=[
-                                ("🎯 Máxima Identidad — para el MONTAJE FINAL",
-                                 config.EXPR_MAXIDENTITY),
-                                ("⚡ Estándar — para TESTEOS rápidos (menos calidad)",
-                                 config.EXPR_STANDARD),
-                            ],
-                            value=config.EXPR_MAXIDENTITY,
-                            label="Preset de calidad",
-                            info="La identidad la pone el modelo entrenado; esto decide el "
-                                 "pegado. Final → Máxima Identidad. Probar encuadre/detección "
-                                 "→ Estándar (varias veces más rápido). VRAM+RAM al máximo "
-                                 "siempre.",
-                        )
-                        ds_chunk = gr.Dropdown(
-                            choices=[("15 segundos (ver resultados muy seguido)", 15),
-                                     ("30 segundos (equilibrado)", 30),
-                                     ("60 segundos (menos uniones)", 60),
-                                     ("Video entero (sin partes)", 0)],
-                            value=30, label="✂️ Procesar por partes de",
-                            info="Cada parte terminada aparece abajo al instante para que "
-                                 "controles la calidad sin esperar el video entero.",
-                        )
-                        ds_process_btn = gr.Button("🎬 MONTAR CARA EN EL VIDEO", variant="primary")
-                        ds_stop_btn = gr.Button(
-                            "⏹️ Detener y guardar lo hecho", variant="stop")
                         gr.Markdown(
-                            "*Detener no tira nada: corta en el frame siguiente, une las partes "
-                            "terminadas y te deja el video hasta ahí en `outputs/`. Al volver a "
-                            "montar, sigue desde la parte que quedó a medias.*",
-                            elem_classes="fuser-soft",
+                            "👉 El montaje tiene ahora su **pestaña propia: 🎬 Montador**. "
+                            "Esta pestaña queda solo para CREAR el modelo .dfm y seguir "
+                            "su entrenamiento.", elem_classes="fuser-soft",
                         )
-                        with gr.Accordion("⏭️ Cola de videos (mismo modelo .dfm)", open=False):
-                            ds_queue = gr.Files(
-                                label="Videos a montar uno tras otro",
-                                file_count="multiple", file_types=["video"], type="filepath",
-                            )
-                            ds_queue_btn = gr.Button("⏭️ Procesar cola", variant="primary")
-                            gr.Markdown(
-                                "*Igual que la cola de Face Swap: el modelo se carga una sola vez, "
-                                "van del más corto al más largo, cada video aparece apenas termina "
-                                "y el que falla se reintenta al final. El botón de detener también "
-                                "corta la cola guardando lo hecho.*",
-                                elem_classes="fuser-soft",
-                            )
-                        ds_output = gr.Video(label="👁️ Última parte terminada (mirá la calidad acá)")
-                        ds_file = gr.Files(label="⬇️ Partes listas (y el video completo al final)")
-                        ds_status = gr.Markdown("", elem_classes="fuser-soft")
 
-            with gr.Tab("🚀 DeepFace CUDA"):
-                gr.Markdown(
-                    "**Lo mismo que la pestaña 🧬 Deep Swap, pero entrenando con el motor "
-                    "NVIDIA CUDA** (~3× más rápido *si arranca* en tu placa).\n\n"
-                    "⚠️ En mi prueba se colgó tras cargar los datos — es un problema conocido "
-                    "del build de 2021 con placas Ada (RTX 40xx). **Probalo vos**: no arriesgás "
-                    "nada, los pesos del modelo son los mismos para los dos motores.\n\n"
-                    "**Si se cuelga** (las iteraciones no suben en 2-3 min): ⏸️ Pausar → volvé a "
-                    "**🧬 Deep Swap** → ▶️ Retomar. Seguís desde la misma iteración con DirectX12."
-                )
-                cu_status = gr.Markdown(_cuda_status_md(), elem_classes="fuser-soft")
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("#### ▶️ Retomar un modelo existente con CUDA")
-                        cu_model = gr.Dropdown(
-                            choices=face_library.list_faces(), label="Modelo a entrenar con CUDA")
-                        with gr.Row():
-                            cu_resume_btn = gr.Button("▶️ Retomar con CUDA", variant="primary")
-                            cu_stop_btn = gr.Button("⏸️ Pausar", variant="secondary")
-                            cu_refresh_btn = gr.Button("🔄 Estado", variant="secondary")
-                        cu_finish_btn = gr.Button("⏹️ Terminar y exportar YA", variant="stop")
-                        cu_result = gr.Markdown("", elem_classes="fuser-soft")
-                        cu_auto = gr.Checkbox(
-                            value=True, label="🔄 Actualizar solo cada 60 s",
-                            info="Trae estado y previews sin apretar nada.",
-                        )
-                        cu_timer = gr.Timer(60.0)
-                        cu_preview = gr.Gallery(
-                            label="👁️ Evolución del modelo — [tu cara | reconstruida | destino | "
-                                  "reconstruido | TU CARA EN EL DESTINO]",
-                            columns=2, height=420, object_fit="contain", show_label=True,
-                        )
-                    with gr.Column():
-                        gr.Markdown("#### 🧬 Crear un modelo NUEVO con CUDA")
-                        cu_name = gr.Textbox(label="Nombre del modelo/persona", placeholder="Cara 1")
-                        cu_person_videos = gr.Files(
-                            label="🎥 VIDEOS de la persona (fuente principal)",
-                            file_count="multiple", file_types=["video"], type="filepath",
-                        )
-                        with gr.Accordion("Fotos extra (opcional)", open=False):
-                            cu_files = gr.Files(
-                                label="Fotos HD", file_count="multiple",
-                                file_types=["image"], type="filepath",
-                            )
-                        with gr.Accordion("Videos destino (opcional)", open=False):
-                            cu_dst_videos = gr.Files(
-                                label="Videos destino", file_count="multiple",
-                                file_types=["video"], type="filepath",
-                            )
-                        cu_create_btn = gr.Button(
-                            "🧬 CREAR MODELO DFM con CUDA", variant="primary")
-                        gr.Markdown(
-                            "*El curado y el armado del dataset son idénticos; solo cambia el "
-                            "motor que entrena.*", elem_classes="fuser-soft",
-                        )
-                        with gr.Accordion("Motor CUDA no instalado / reinstalar", open=False):
-                            cu_install_btn = gr.Button("⬇️ Instalar motor CUDA (3,7 GB)",
-                                                       variant="secondary")
+            # ===== 🎬 Montador: pestaña propia, codigo en ui/montador.py =====
+            with gr.Tab("🎬 Montador"):
+                mont = montador.build_tab()
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
@@ -2351,7 +1646,7 @@ def build_interface() -> gr.Blocks:
         refresh_btn.click(_on_refresh_system, inputs=None, outputs=system_md)
         # 🚦 semáforo de fondo: refresco periódico + al pausar/retomar entrenamientos
         bg_timer.tick(_bg_status_md, inputs=None, outputs=bg_status_md)
-        for _btn in (cm_stop_btn, cm_resume_btn, cu_stop_btn, cu_resume_btn):
+        for _btn in (cm_stop_btn, cm_resume_btn):
             _btn.click(_bg_status_md, inputs=None, outputs=bg_status_md)
         close_btn.click(_on_app_close, inputs=close_armed,
                         outputs=[close_armed, close_btn, close_md])
@@ -2400,71 +1695,42 @@ def build_interface() -> gr.Blocks:
         cm_finish_btn.click(
             _on_finish_export,
             inputs=cm_model_cara,
-            outputs=[cm_train_status, ds_dfm_choice],
+            outputs=[cm_train_status, mont["dfm_dd"]],
         )
         cm_import_btn.click(
             _on_import_dfm,
             inputs=[cm_model_cara, cm_dfm_file],
-            outputs=[cm_import_status, cm_dfm_file, ds_dfm_choice],
+            outputs=[cm_import_status, cm_dfm_file, mont["dfm_dd"]],
         )
-        ds_process_btn.click(
-            _on_deepswap_process,
-            inputs=[ds_dfm_choice, ds_video, ds_mode, ds_chunk],
-            outputs=[ds_output, ds_file, ds_status],
-        )
-        ds_queue_btn.click(
-            _on_deepswap_queue,
-            inputs=[ds_dfm_choice, ds_queue, ds_mode, ds_chunk],
-            outputs=[ds_output, ds_file, ds_status],
-        )
-        # El botón de detener corre en su PROPIO evento (sin cola de Gradio) para
-        # que llegue mientras el montaje está ocupado renderizando.
-        ds_stop_btn.click(_on_deepswap_stop, inputs=None, outputs=ds_status, queue=False)
-        # Pestaña "🚀 DeepFace CUDA" — mismas acciones, motor CUDA
-        cu_resume_btn.click(_on_resume_cuda, inputs=cu_model, outputs=cu_result)
-        cu_stop_btn.click(_on_trainer_stop, inputs=cu_model, outputs=cu_result)
-        cu_refresh_btn.click(_on_trainer_refresh, inputs=cu_model,
-                             outputs=[cu_result, cu_preview])
-        cu_timer.tick(_on_trainer_tick, inputs=[cu_model, cu_auto],
-                      outputs=[cu_result, cu_preview])
-        cu_finish_btn.click(_on_finish_export, inputs=cu_model,
-                            outputs=[cu_result, ds_dfm_choice])
-        cu_create_btn.click(
-            _on_create_dfm_cuda,
-            inputs=[cu_name, cu_files, cu_person_videos, cu_dst_videos],
-            outputs=[cu_result, face_choice, lib_delete, cm_model_cara],
-        )
-        cu_install_btn.click(_on_install_cuda_engine, inputs=None, outputs=cu_result)
-        # los desplegables de modelo se refrescan juntos al crear/borrar caras
-        cm_create_btn.click(lambda: gr.update(choices=face_library.list_faces()),
-                            inputs=None, outputs=cu_model)
-        cu_create_btn.click(lambda: gr.update(choices=face_library.list_faces()),
-                            inputs=None, outputs=cu_model)
-
         preview_btn.click(
             _on_preview,
             inputs=[source_files, face_choice, dfm_choice, target_video, n_preview, *control_inputs],
             outputs=[preview_gallery, status_md],
+            concurrency_id="gpu", concurrency_limit=1,
         )
         cmp_btn.click(
             _on_compare,
             inputs=[source_files, face_choice, target_video, cmp_models, cmp_frames, *control_inputs],
             outputs=[cmp_gallery, cmp_status],
+            concurrency_id="gpu", concurrency_limit=1,
         )
         process_btn.click(
             _on_process,
             inputs=[source_files, face_choice, dfm_choice, target_video, *control_inputs],
             outputs=[output_video, output_file, status_md],
+            concurrency_id="gpu", concurrency_limit=1,
         )
         max_swap_btn.click(
             _on_maximum_swap,
             inputs=[source_files, face_choice, dfm_choice, target_video],   # nuclear: ignora los controles
             outputs=[output_video, output_file, status_md, ba_slider],
+            concurrency_id="gpu", concurrency_limit=1,
         )
         queue_btn.click(
             _on_process_queue,
             inputs=[source_files, face_choice, dfm_choice, video_queue, *control_inputs],
             outputs=[queue_results, queue_status],
+            concurrency_id="gpu", concurrency_limit=1,
         )
         split_btn.click(
             _on_split_video,

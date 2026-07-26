@@ -871,7 +871,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         # (persisten entre instancias del engine). Sin esto, cambiar de modelo de
         # swap en el mismo proceso reusa el pool viejo (bug del pool obsoleto:
         # 'embedding_converter None'). Clave para la cadena forma→textura.
-        for key in ("swapper", "enhancer"):
+        for key in ("swapper", "enhancer", "deep_swapper"):
             mod = self._modules.get(key)
             if mod is not None and hasattr(mod, "clear_inference_pool"):
                 try:
