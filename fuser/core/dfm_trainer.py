@@ -439,6 +439,18 @@ def _run_dfl(args: List[str], log_file: Path, cwd: Optional[Path] = None,
         str(internal / "ffmpeg"), env.get("PATH", ""),
     ])
     env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    if p["backend"] == "cuda":
+        # MEDIDO: el build trae CUDA 11.0 (cudart64_110.dll), que solo tiene
+        # kernels hasta sm_80; esta GPU es Ada (sm_89), así que el driver compila
+        # PTX en vivo (JIT). Con la caché por defecto quedaban 45 KB / 5 archivos
+        # = se RECOMPILA casi todo, todo el tiempo -> 20 s/iter (vs 3 s en DX12) y
+        # el "freeze" inicial. Caché grande y propia: compila UNA vez y reutiliza.
+        cache = dfl_root() / "cuda_jit_cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        env["CUDA_CACHE_PATH"] = str(cache)
+        env["CUDA_CACHE_MAXSIZE"] = str(4 * 1024 ** 3)   # 4 GB (default ~256 MB)
+        env["CUDA_CACHE_DISABLE"] = "0"
+        env.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
     cmd = [str(py), str(main)] + args
     log_file.parent.mkdir(parents=True, exist_ok=True)
     lf = open(log_file, "ab")

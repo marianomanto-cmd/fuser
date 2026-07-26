@@ -298,6 +298,41 @@ def _on_trainer_resume(cara):
         return f"⚠️ {exc}"
 
 
+# --- Pestaña CUDA: mismas acciones, motor forzado a "cuda" ---------------------
+def _on_create_dfm_cuda(name, files, person_videos, dst_videos, progress=gr.Progress()):
+    return _on_create_dfm(name, files, person_videos, dst_videos, progress, backend="cuda")
+
+
+def _on_resume_cuda(cara):
+    """▶️ Retomar CON CUDA. Si el build se cuelga, el modelo queda intacto:
+    volvés a la pestaña 🧬 Deep Swap y retomás con DirectX12."""
+    from ..core import dfm_trainer
+    if not cara:
+        return "⚠️ Elegí el modelo."
+    try:
+        if not dfm_trainer.backend_ready("cuda"):
+            return "⚠️ El motor CUDA no está instalado (usá «Instalar motor CUDA»)."
+        msg = dfm_trainer.start(cara, backend="cuda")
+    except Exception as exc:
+        return f"⚠️ {exc}"
+    return (f"{msg}\n\n⏳ **Esperá 2-3 minutos y mirá el estado**: si las iteraciones "
+            f"empiezan a subir, CUDA funciona 🎉. Si se queda clavado en 0 (el log frena "
+            f"en «Sort by yaw»), es el freeze conocido: apretá **⏸️ Pausar**, andá a "
+            f"**🧬 Deep Swap** y retomá ahí con DirectX12 — el modelo no se toca.")
+
+
+def _on_install_cuda_engine(progress=gr.Progress()):
+    from ..core import dfm_trainer
+    try:
+        progress(0.01, desc="Instalando el motor CUDA (se reanuda si se corta)…")
+        msg = dfm_trainer.install(progress=lambda f, m="": progress(min(f, 0.99), desc=m),
+                                  backend="cuda")
+    except Exception as exc:
+        log.exception("Instalación de CUDA falló")
+        return f"⚠️ {exc}"
+    return f"{msg}\n\n{_cuda_status_md()}"
+
+
 def _curate_and_create_face(name, files, progress, frac0=0.0, frac1=0.3,
                             person_videos=None):
     """Cura fotos + frames de los VIDEOS DE LA PERSONA, crea la Cara.
@@ -370,12 +405,14 @@ def _trainer_status_md() -> str:
             f"preentrenado RTT {_mark(st['rtt_ready'])} · set genérico {_mark(st.get('rtm_ready'))}.")
 
 
-def _on_create_dfm(name, files, person_videos, dst_videos, progress=gr.Progress()):
+def _on_create_dfm(name, files, person_videos, dst_videos, progress=gr.Progress(),
+                   backend=None):
     """🧬 CREAR MODELO DFM — un botón, todo automático.
 
     Instala lo que falte → cura las fotos → crea la Cara → sintetiza el faceset
     (si hay pocas fotos) → prepara el workspace → ENTRENA en segundo plano. El
     autopiloto exporta y registra el modelo al llegar al objetivo de iteraciones.
+    ``backend`` fuerza el motor (la pestaña CUDA pasa "cuda").
     """
     from ..core import dfm_trainer
     name = (name or "").strip()
@@ -385,6 +422,10 @@ def _on_create_dfm(name, files, person_videos, dst_videos, progress=gr.Progress(
     if not (st["build_ready"] and st["rtt_ready"]):
         progress(0.0, desc="Instalando el entrenador local (descarga única, puede tardar)…")
         dfm_trainer.install(progress=lambda f, m="": progress(f * 0.15, desc=m))
+    if backend and not dfm_trainer.backend_ready(backend):
+        progress(0.05, desc=f"Instalando el motor {backend.upper()}…")
+        dfm_trainer.install(progress=lambda f, m="": progress(0.05 + f * 0.1, desc=m),
+                            backend=backend)
     report_md, curated = _curate_and_create_face(name, files, progress, 0.15, 0.30,
                                                  person_videos=person_videos)
     videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (dst_videos or [])]
@@ -392,7 +433,7 @@ def _on_create_dfm(name, files, person_videos, dst_videos, progress=gr.Progress(
     msg_prep = dfm_trainer.prepare(name, curated, videos,
                                    progress=lambda f, m="": progress(0.30 + f * 0.62, desc=m))
     progress(0.94, desc="Lanzando el entrenamiento…")
-    msg_train = dfm_trainer.start(name)
+    msg_train = dfm_trainer.start(name, backend=backend)
     faces = face_library.list_faces()
     status_md = (
         f"### ✅ Modelo «{name}» en marcha\n\n{report_md}\n\n{msg_prep}\n\n{msg_train}\n\n"
@@ -556,10 +597,28 @@ def _cuda_status_md() -> str:
         return f"⚠️ {exc}"
     lines = []
     for b, info in st["backends"].items():
-        mark = "✅ instalado" if info["ready"] else "⏳ no instalado"
-        act = " ← **EN USO**" if b == st["active"] else ""
-        lines.append(f"- **{info['label']}**: {mark}{act}")
-    return "### Motores de entrenamiento\n" + "\n".join(lines)
+        mark = "instalado" if info["ready"] else "no instalado"
+        act = " · ✅ **EN USO**" if b == st["active"] else ""
+        lines.append(f"- **{info['label']}** — {mark}{act}")
+    return "**Estado actual:**\n" + "\n".join(lines)
+
+
+# Resultado de la prueba de CUDA hecha en esta máquina (2026-07-25): el build
+# NVIDIA disponible es de 2021 y esta placa es Ada -> se cuelga tras cargar los
+# datos, sin error. Se documenta en la UI para no invitar a repetir el intento.
+CUDA_VERDICT_MD = """
+### ❌ En esta placa, CUDA no funciona (ya lo probamos)
+
+La RTX 4060 Ti es arquitectura **Ada**; el único build NVIDIA de DeepFaceLab que
+existe es de **2021** y no la soporta: arranca, carga las muestras y se **cuelga
+sin dar ningún error**. Es un problema conocido de ese build, no de tu equipo.
+
+**No tenés que hacer nada acá.** El motor **DirectX12** ya está activo y es el que
+usa tu entrenamiento: más lento (~3,5 s por iteración) pero estable.
+
+*Esta pestaña queda por si en el futuro sale un build nuevo de DeepFaceLab que sí
+soporte Ada — ahí valdría la pena reintentar.*
+"""
 
 
 def _on_install_cuda(progress=gr.Progress()):
@@ -1790,36 +1849,62 @@ def build_interface() -> gr.Blocks:
 
             with gr.Tab("🚀 DeepFace CUDA"):
                 gr.Markdown(
-                    "Dos motores de entrenamiento **conviven**: podés probar el rápido sin perder "
-                    "el que ya funciona.\n\n"
-                    "- **DirectX12 (estable)** — el que estás usando. Lento (~3,5 s/iteración) "
-                    "pero anda seguro en esta placa.\n"
-                    "- **NVIDIA CUDA (experimental)** — hasta ~3× más rápido *si arranca*. El "
-                    "build disponible es de 2021 y esta GPU es posterior (Ada): el modo de falla "
-                    "conocido es quedarse colgado tras cargar los datos. Por eso hay que probarlo.\n\n"
-                    "Los pesos del modelo **no dependen del motor**: podés entrenar en uno y "
-                    "seguir en el otro sin perder iteraciones."
+                    "**Lo mismo que la pestaña 🧬 Deep Swap, pero entrenando con el motor "
+                    "NVIDIA CUDA** (~3× más rápido *si arranca* en tu placa).\n\n"
+                    "⚠️ En mi prueba se colgó tras cargar los datos — es un problema conocido "
+                    "del build de 2021 con placas Ada (RTX 40xx). **Probalo vos**: no arriesgás "
+                    "nada, los pesos del modelo son los mismos para los dos motores.\n\n"
+                    "**Si se cuelga** (las iteraciones no suben en 2-3 min): ⏸️ Pausar → volvé a "
+                    "**🧬 Deep Swap** → ▶️ Retomar. Seguís desde la misma iteración con DirectX12."
                 )
                 cu_status = gr.Markdown(_cuda_status_md(), elem_classes="fuser-soft")
                 with gr.Row():
-                    cu_install_btn = gr.Button("⬇️ Instalar motor CUDA (3,7 GB)", variant="secondary")
-                    cu_test_btn = gr.Button("🧪 Probar CUDA en esta placa", variant="primary")
-                gr.Markdown(
-                    "⚠️ **La prueba usa la GPU** unos minutos con material de stock. Si tenés un "
-                    "entrenamiento corriendo, va a competir con él: pausalo antes o probá cuando "
-                    "esté libre. No toca tus modelos ni tus videos.",
-                    elem_classes="fuser-soft",
-                )
-                cu_result = gr.Markdown("", elem_classes="fuser-soft")
-                gr.Markdown("### Motor a usar en los próximos entrenamientos")
-                cu_backend = gr.Radio(
-                    choices=[("DirectX12 — estable (recomendado)", "dml"),
-                             ("NVIDIA CUDA — rápido (solo si la prueba dio OK)", "cuda")],
-                    value="dml", label="Motor activo",
-                    info="Aplica al próximo entrenamiento que arranques o retomes. "
-                         "Lo que ya está corriendo no se toca.",
-                )
-                cu_apply_btn = gr.Button("✅ Usar este motor", variant="secondary")
+                    with gr.Column():
+                        gr.Markdown("#### ▶️ Retomar un modelo existente con CUDA")
+                        cu_model = gr.Dropdown(
+                            choices=face_library.list_faces(), label="Modelo a entrenar con CUDA")
+                        with gr.Row():
+                            cu_resume_btn = gr.Button("▶️ Retomar con CUDA", variant="primary")
+                            cu_stop_btn = gr.Button("⏸️ Pausar", variant="secondary")
+                            cu_refresh_btn = gr.Button("🔄 Estado", variant="secondary")
+                        cu_finish_btn = gr.Button("⏹️ Terminar y exportar YA", variant="stop")
+                        cu_result = gr.Markdown("", elem_classes="fuser-soft")
+                        cu_auto = gr.Checkbox(
+                            value=True, label="🔄 Actualizar solo cada 60 s",
+                            info="Trae estado y previews sin apretar nada.",
+                        )
+                        cu_timer = gr.Timer(60.0)
+                        cu_preview = gr.Gallery(
+                            label="👁️ Evolución del modelo — [tu cara | reconstruida | destino | "
+                                  "reconstruido | TU CARA EN EL DESTINO]",
+                            columns=2, height=420, object_fit="contain", show_label=True,
+                        )
+                    with gr.Column():
+                        gr.Markdown("#### 🧬 Crear un modelo NUEVO con CUDA")
+                        cu_name = gr.Textbox(label="Nombre del modelo/persona", placeholder="Cara 1")
+                        cu_person_videos = gr.Files(
+                            label="🎥 VIDEOS de la persona (fuente principal)",
+                            file_count="multiple", file_types=["video"], type="filepath",
+                        )
+                        with gr.Accordion("Fotos extra (opcional)", open=False):
+                            cu_files = gr.Files(
+                                label="Fotos HD", file_count="multiple",
+                                file_types=["image"], type="filepath",
+                            )
+                        with gr.Accordion("Videos destino (opcional)", open=False):
+                            cu_dst_videos = gr.Files(
+                                label="Videos destino", file_count="multiple",
+                                file_types=["video"], type="filepath",
+                            )
+                        cu_create_btn = gr.Button(
+                            "🧬 CREAR MODELO DFM con CUDA", variant="primary")
+                        gr.Markdown(
+                            "*El curado y el armado del dataset son idénticos; solo cambia el "
+                            "motor que entrena.*", elem_classes="fuser-soft",
+                        )
+                        with gr.Accordion("Motor CUDA no instalado / reinstalar", open=False):
+                            cu_install_btn = gr.Button("⬇️ Instalar motor CUDA (3,7 GB)",
+                                                       variant="secondary")
 
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
@@ -1896,10 +1981,26 @@ def build_interface() -> gr.Blocks:
             inputs=[ds_dfm_choice, ds_video, ds_mode, ds_chunk],
             outputs=[ds_output, ds_file, ds_status],
         )
-        # Pestaña "🚀 DeepFace CUDA" — instalar / probar / elegir motor
-        cu_install_btn.click(_on_install_cuda, inputs=None, outputs=cu_result)
-        cu_test_btn.click(_on_test_cuda, inputs=None, outputs=cu_result)
-        cu_apply_btn.click(_on_set_backend, inputs=cu_backend, outputs=cu_result)
+        # Pestaña "🚀 DeepFace CUDA" — mismas acciones, motor CUDA
+        cu_resume_btn.click(_on_resume_cuda, inputs=cu_model, outputs=cu_result)
+        cu_stop_btn.click(_on_trainer_stop, inputs=cu_model, outputs=cu_result)
+        cu_refresh_btn.click(_on_trainer_refresh, inputs=cu_model,
+                             outputs=[cu_result, cu_preview])
+        cu_timer.tick(_on_trainer_tick, inputs=[cu_model, cu_auto],
+                      outputs=[cu_result, cu_preview])
+        cu_finish_btn.click(_on_finish_export, inputs=cu_model,
+                            outputs=[cu_result, ds_dfm_choice])
+        cu_create_btn.click(
+            _on_create_dfm_cuda,
+            inputs=[cu_name, cu_files, cu_person_videos, cu_dst_videos],
+            outputs=[cu_result, face_choice, lib_delete, cm_model_cara],
+        )
+        cu_install_btn.click(_on_install_cuda_engine, inputs=None, outputs=cu_result)
+        # los desplegables de modelo se refrescan juntos al crear/borrar caras
+        cm_create_btn.click(lambda: gr.update(choices=face_library.list_faces()),
+                            inputs=None, outputs=cu_model)
+        cu_create_btn.click(lambda: gr.update(choices=face_library.list_faces()),
+                            inputs=None, outputs=cu_model)
 
         preview_btn.click(
             _on_preview,
