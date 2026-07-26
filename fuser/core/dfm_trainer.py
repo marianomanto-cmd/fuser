@@ -902,8 +902,16 @@ def start(name: str, backend: Optional[str] = None) -> str:
     # anda bien, pero en CUDA esa memoria es HOST ANCLADA (allocator gpu_host_bfc)
     # con cupo chico y revienta con "OOM shape[25088,512] ... device:CPU:0" en el
     # optimizador (medido). En CUDA va en la GPU.
-    _patch_model_options(model, write_preview_history=True,
-                         models_opt_on_gpu=(_paths(backend)["backend"] == "cuda"))
+    _is_cuda = _paths(backend)["backend"] == "cuda"
+    _opts = {"write_preview_history": True, "models_opt_on_gpu": _is_cuda}
+    if _is_cuda:
+        # lr_dropout genera una máscara aleatoria del TAMAÑO DE CADA MATRIZ DE
+        # PESOS con un tf.where (op Select). Es exactamente donde revienta CUDA:
+        # "OOM shape[25088,512] ... src_dst_opt_1/Select_22". DirectX12 lo aguanta;
+        # el allocator de CUDA no. Se apaga solo en CUDA (es una mejora de
+        # convergencia opcional, no algo imprescindible).
+        _opts["lr_dropout"] = "n"
+    _patch_model_options(model, **_opts)
     if _model_iter(model) <= 1:      # recién sembrado del RTT y aún sin entrenar
         _reset_preview_samples(model)
     # cinturón: un .dfm dentro de model/ CONGELA el resume (workspaces viejos)
