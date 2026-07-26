@@ -27,7 +27,7 @@ from ..config import (
     Settings,
 )
 from ..utils.logging import get_logger
-from ..utils.system import get_system_info
+from ..utils.system import get_system_info, ram_available_gb
 
 log = get_logger(__name__)
 
@@ -127,6 +127,19 @@ class MemoryManager:
     def is_facefusion(self) -> bool:
         return self.settings.engine == ENGINE_FACEFUSION
 
+    @property
+    def ram_free_gb(self):
+        """RAM libre **ahora**, no la del arranque.
+
+        ``self.info`` viene de ``get_system_info()``, que lleva ``lru_cache``: su
+        ``ram_available_gb`` es la foto del arranque de la app. Todo presupuesto
+        que se recalcula por vídeo o por tramo tiene que mirar la RAM real del
+        momento — si no, a mitad de un montaje encadenado se siguen pidiendo
+        buffers como si estuvieran libres los 30 GB del principio.
+        """
+        live = ram_available_gb()
+        return live if live else self.info.ram_available_gb
+
     def _ram_profile(self) -> dict:
         return RAM_FRACTIONS.get(self.settings.ram_mode, RAM_FRACTIONS[RAM_BALANCED])
 
@@ -147,7 +160,8 @@ class MemoryManager:
         la GPU nunca espere. Con perfil "máximo" en 32 GB+ los buffers son enormes.
         """
         base_pf, base_wq = self.prefetch_frames, self.writer_queue
-        if not self.info.ram_available_gb:
+        free_gb = self.ram_free_gb
+        if not free_gb:
             return base_pf, base_wq
         prof = self._ram_profile()
         cfg = self._engine_cfg()
@@ -157,7 +171,7 @@ class MemoryManager:
         frame_mb = (h * w * 3) / (1024 ** 2)
         if frame_mb <= 0:
             return base_pf, base_wq
-        budget_mb = self.info.ram_available_gb * 1024 * frac
+        budget_mb = free_gb * 1024 * frac
         n = int(budget_mb / frame_mb / 2)
         n = max(base_pf, min(n, cap))
         return n, n
@@ -170,7 +184,8 @@ class MemoryManager:
         agranda aún más. Con perfil "máximo" en clips cortos cabe el vídeo entero
         en RAM (suavizado global, máxima estabilidad).
         """
-        if not self.info.ram_available_gb:
+        free_gb = self.ram_free_gb
+        if not free_gb:
             return 300
         prof = self._ram_profile()
         cfg = self._engine_cfg()
@@ -178,7 +193,7 @@ class MemoryManager:
         cap = int(prof["chunk_cap"] * cfg["chunk_cap_mult"])
         h, w = frame_shape[:2]
         frame_mb = max((h * w * 3) / (1024 ** 2), 0.1)
-        budget_mb = self.info.ram_available_gb * 1024 * frac
+        budget_mb = free_gb * 1024 * frac
         n = int(budget_mb / frame_mb)
         return max(60, min(n, cap))
 

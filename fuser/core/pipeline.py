@@ -34,6 +34,31 @@ log = get_logger(__name__)
 ProgressCb = Optional[Callable[[float, str], None]]
 
 
+# ---------------------------------------------------------------------------
+# Parada cooperativa del montaje (botón "detener" de la UI)
+# ---------------------------------------------------------------------------
+# El render corre en el hilo del worker de Gradio; el botón de detener llega por
+# OTRO evento. Con una bandera de módulo, el botón solo la levanta y el bucle de
+# frames la mira una vez por frame y sale limpiamente: el escritor cierra bien el
+# mp4, así que lo renderizado HASTA ESE MOMENTO queda como un vídeo válido (que
+# es justo lo que hay que entregar al usuario, no tirarlo).
+_STOP = threading.Event()
+
+
+def request_stop() -> None:
+    """Pide al render en curso que se detenga en el próximo frame."""
+    _STOP.set()
+
+
+def clear_stop() -> None:
+    """Baja la bandera (se llama al ARRANCAR un montaje, no al terminarlo)."""
+    _STOP.clear()
+
+
+def stop_requested() -> bool:
+    return _STOP.is_set()
+
+
 def format_eta(seconds: float) -> str:
     seconds = int(max(0, seconds))
     h, rem = divmod(seconds, 3600)
@@ -54,6 +79,10 @@ class SwapPipeline:
         self.engine = None
         self._loaded = False
         self._postfx_warned = False
+        # True si el ÚLTIMO process_video se cortó por petición del usuario. El
+        # vídeo devuelto es válido pero PARCIAL: el llamador debe etiquetarlo así
+        # y no darlo por terminado (p. ej. no marcarlo como parte completada).
+        self.interrupted = False
 
     # ----- swap de un frame (motor + post-fx fotométrico) ----------------------
     def _swap_frame(self, frame: np.ndarray, use_smoothing: bool) -> np.ndarray:
@@ -178,6 +207,7 @@ class SwapPipeline:
         if not self.engine.has_source:
             raise RuntimeError("Falta la cara fuente. Sube una imagen fuente primero.")
 
+        self.interrupted = False
         ensure_dirs()
         info = videoutil.probe(video_path)
         out_w, out_h = self._output_dims(info.width, info.height)
@@ -206,6 +236,13 @@ class SwapPipeline:
                 processed = self._run_single_pass(video_path, info, writer, progress)
         finally:
             writer.close()
+
+        # ¿Se cortó por el botón de detener? El vídeo escrito hasta aquí es válido:
+        # se finaliza igual (con su audio) y se devuelve, pero marcado como parcial.
+        self.interrupted = stop_requested()
+        if self.interrupted:
+            log.info("Montaje detenido por el usuario tras %d frames.", processed)
+            return self._finalize(tmp_video, video_path, info, final_out, processed, progress)
 
         # Segunda pasada opcional: detecta frames defectuosos y los corrige. Una falla
         # aquí NO debe perder el vídeo ya renderizado (degradamos al sin-corregir).
@@ -246,6 +283,29 @@ class SwapPipeline:
         from ..models.face_analyser import FaceAnalyser
 
         proc_res = self.settings.processing_resolution
+
+        # Guardia de RAM **ANTES** de decodificar. El QC mantiene DOS juegos de
+        # frames crudos en memoria (original + swapeado): a 1080p son ~11 GB por
+        # minuto de vídeo. La guardia vivía DESPUÉS de construir las dos listas,
+        # así que no protegía de nada — para cuando se evaluaba, la memoria ya
+        # estaba pedida y el proceso podía morir ahí mismo: justo al terminar de
+        # renderizar, que es cuando el chunker entrega la parte y encadena la
+        # siguiente (síntoma: "entrega el output y la app se cae").
+        # La RAM libre se lee EN VIVO: la del retrato del sistema está cacheada
+        # desde el arranque y sobra por decenas de GB a mitad de un montaje.
+        est_h, est_w = self._output_dims(info.width, info.height)
+        est_n = int(info.frame_count)
+        avail = self.mm.ram_free_gb or 8.0
+        if est_n >= 8:
+            need_gb = 2.2 * est_n * est_h * est_w * 3 / (1024 ** 3)
+            if need_gb > 0.45 * avail:
+                log.warning("QC: vídeo demasiado largo para la RAM (~%.1f GB > %.1f GB de "
+                            "presupuesto). Se omite la 2ª pasada; cortá el vídeo en partes "
+                            "más chicas para usarla.", need_gb, 0.45 * avail)
+                if progress:
+                    progress(0.99, "2ª pasada omitida (no entra en RAM): usá partes más cortas.")
+                return str(swapped_video)
+
         orig = [imageutil.limit_resolution(f, proc_res)[0] for f in videoutil.read_frames(video_path)]
         swap = list(videoutil.read_frames(str(swapped_video)))
         n = min(len(orig), len(swap))
@@ -253,15 +313,17 @@ class SwapPipeline:
         if n < 8:
             return str(swapped_video)
 
-        # Guardia de RAM: el QC mantiene ~2 juegos de frames en memoria.
+        # Backstop: si el contenedor mentía sobre el nº de frames, la estimación de
+        # arriba se quedó corta. Con las listas ya en RAM, medimos de verdad y
+        # abortamos antes de la fase cara (análisis + re-swap duplican el pico).
         h, w = swap[0].shape[:2]
-        need_gb = 2.2 * n * h * w * 3 / (1024 ** 3)
-        avail = self.mm.info.ram_available_gb or 8.0
-        if need_gb > 0.45 * avail:
-            log.warning("QC: vídeo demasiado largo para la RAM (~%.1f GB > presupuesto). Se "
-                        "omite la 2ª pasada; cortá el vídeo en partes para usarla.", need_gb)
+        real_gb = 2.2 * n * h * w * 3 / (1024 ** 3)
+        if real_gb > 0.45 * (self.mm.ram_free_gb or avail):
+            del orig, swap
+            log.warning("QC: el vídeo resultó más largo de lo que decía el contenedor "
+                        "(~%.1f GB). Se omite la 2ª pasada.", real_gb)
             if progress:
-                progress(0.99, "2ª pasada omitida (vídeo largo): cortalo en partes.")
+                progress(0.99, "2ª pasada omitida (no entra en RAM): usá partes más cortas.")
             return str(swapped_video)
 
         if progress:
@@ -399,13 +461,25 @@ class SwapPipeline:
                     break
                 if "decode" in errors:
                     raise errors["decode"]
+                if stop_requested():         # botón de detener: corta y guarda lo hecho
+                    break
                 out_q.put(self._swap_frame(frame, use_smoothing=True))
                 processed += 1
                 self._emit_progress(progress, processed, total, start)
         finally:
             out_q.put(None)
             wt.join()
-            dt.join(timeout=2)
+            # Al cortar antes de tiempo (botón de detener) el decodificador puede
+            # estar bloqueado en in_q.put con la cola llena. Vaciamos hasta su
+            # centinela para que termine: si no, el hilo queda vivo reteniendo
+            # todo el buffer de prefetch (varios GB con el perfil de RAM máximo).
+            while dt.is_alive():
+                try:
+                    if in_q.get(timeout=0.1) is None:
+                        break
+                except queue.Empty:
+                    continue
+            dt.join(timeout=5)
 
         if "decode" in errors:
             raise errors["decode"]
@@ -456,14 +530,24 @@ class SwapPipeline:
                 faces_per_frame, time_sigma=time_sigma, motion_adaptive=self.settings.motion_adaptive
             )
             for fr, faces in zip(frames, faces_per_frame):
+                if stop_requested():   # detener: lo escrito hasta aquí ya es un vídeo válido
+                    return False
                 targets = self.engine.select_targets(faces)
                 writer.write(self.engine.render(fr, targets))
                 rendered += 1
                 emit()
+            return True
 
+        # Cada llamada procesa un vídeo independiente (el chunker monta parte por
+        # parte con el MISMO pipeline): el estado temporal del motor no debe
+        # arrastrarse de un vídeo al siguiente o el primer frame hereda landmarks
+        # de otra escena.
+        self.engine.reset_temporal()
         frames: list = []
         faces_per_frame: list = []
         for frame in videoutil.read_frames(video_path):
+            if stop_requested():
+                break
             work, _ = imageutil.limit_resolution(frame, proc_res)
             faces = self.engine.detect(work)
             frames.append(work)
@@ -472,7 +556,8 @@ class SwapPipeline:
             if detected % 10 == 0:
                 emit("detect")
             if len(frames) >= chunk:
-                flush(frames, faces_per_frame)
+                if not flush(frames, faces_per_frame):
+                    return rendered
                 frames, faces_per_frame = [], []
 
         if frames:

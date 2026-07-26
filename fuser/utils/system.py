@@ -82,6 +82,17 @@ def _query_ram() -> tuple[Optional[float], Optional[float]]:
         return None, None
 
 
+def ram_available_gb() -> Optional[float]:
+    """RAM libre **ahora mismo** (GB), sin cachear.
+
+    ``get_system_info`` lleva ``lru_cache``: su ``ram_available_gb`` es la foto
+    del arranque y sobreestima la RAM libre en cuanto el proceso carga frames.
+    Todo presupuesto de memoria que se recalcula por vídeo o por tramo debe
+    consultar ESTA función, no el retrato del sistema.
+    """
+    return _query_ram()[1]
+
+
 def ffmpeg_path() -> Optional[str]:
     """Localiza un binario de ffmpeg: del sistema o el que trae imageio-ffmpeg."""
     system = shutil.which("ffmpeg")

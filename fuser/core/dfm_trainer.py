@@ -1045,9 +1045,7 @@ def preview_images(name: str, limit: int = 6) -> List[tuple]:
     return [(str(f), f"iter {it:,}") for it, f in shots[-max(1, limit):]]
 
 
-def stop(name: str) -> str:
-    from ..core.face_library import _slug
-    slug = _slug(name)
+def _stop_slug(slug: str) -> str:
     pid = _pid_of(slug)
     if not pid or not is_running(slug):
         _clear_pid(slug)
@@ -1057,6 +1055,78 @@ def stop(name: str) -> str:
     _write_state(slug, phase="stopped")
     return ("⏸️ Entrenamiento detenido. DFL autoguarda cada ~15 min: como mucho se pierde ese tramo. "
             "Podés retomarlo cuando quieras (mismo botón de entrenar).")
+
+
+def stop(name: str) -> str:
+    from ..core.face_library import _slug
+    return _stop_slug(_slug(name))
+
+
+def _live_train_pids() -> set:
+    """PIDs de entrenamientos DFL vivos, en UNA sola consulta a Windows.
+
+    ``is_running`` lanza un PowerShell por workspace: con varias personas en la
+    biblioteca eso son segundos de espera. Para recorrer todos (botón de cierre,
+    panel de estado) conviene un único barrido de procesos.
+    """
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*python*' -and "
+             "$_.CommandLine -like '*main.py*' -and $_.CommandLine -like '*train*' } | "
+             "ForEach-Object { $_.ProcessId }"],
+            capture_output=True, text=True, timeout=30)
+        return {int(x) for x in (r.stdout or "").split() if x.strip().isdigit()}
+    except Exception as exc:
+        log.warning("No pude listar los procesos de entrenamiento: %s", exc)
+        return set()
+
+
+def _workspaces_with_pid() -> List[tuple]:
+    """(slug, nombre, pid) de cada workspace con un ``train.pid`` escrito."""
+    wsr = _paths()["workspaces"]
+    if not wsr.is_dir():
+        return []
+    out = []
+    for d in sorted(wsr.iterdir()):
+        if not d.is_dir():
+            continue
+        pid = _pid_of(d.name)
+        if pid:
+            out.append((d.name, _read_state(d.name).get("name") or d.name, pid))
+    return out
+
+
+def running_trainings() -> List[str]:
+    """Nombres de las personas con un entrenamiento DFL vivo AHORA MISMO.
+
+    Lee los workspaces en disco (no la memoria del proceso) porque los
+    entrenamientos sobreviven al cierre de la app: al reabrir Fuser hay que
+    poder verlos igual.
+    """
+    live = _live_train_pids()
+    return [name for _slug_, name, pid in _workspaces_with_pid() if pid in live]
+
+
+def stop_all() -> List[str]:
+    """Pausa TODOS los entrenamientos DFL vivos. Devuelve los que paró.
+
+    Los procesos de DeepFaceLab son subprocesos desacoplados: matar Fuser no los
+    toca. Para que "cerrar la app" signifique de verdad "no queda nada corriendo"
+    hay que pararlos uno a uno antes de salir.
+    """
+    live = _live_train_pids()
+    stopped = []
+    for slug, name, pid in _workspaces_with_pid():
+        if pid not in live:
+            continue
+        try:
+            _stop_slug(slug)
+            stopped.append(name)
+            log.info("Entrenamiento pausado al cerrar Fuser: %s", name)
+        except Exception as exc:
+            log.warning("No pude pausar el entrenamiento de %s: %s", slug, exc)
+    return stopped
 
 
 def test_backend(backend: str, slug: str = "q_stock", minutes: int = 8,

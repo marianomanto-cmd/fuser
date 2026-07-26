@@ -14,7 +14,9 @@ Gradio + CSS custom (ver ``CUSTOM_CSS``), sin tocar la lógica ni el wiring.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import time
 from collections import deque
 from dataclasses import asdict, replace
@@ -27,6 +29,7 @@ import numpy as np
 
 from .. import __app_name__, __version__, config
 from ..core import face_library
+from ..core import pipeline as pipeline_core
 from ..core.pipeline import SwapPipeline
 from ..utils import video as videoutil
 from ..utils.logging import get_logger
@@ -459,6 +462,73 @@ def _on_trainer_stop(cara):
         return f"⚠️ {exc}"
 
 
+def _shutdown_now(delay: float = 2.5) -> None:
+    """Apaga Fuser: mata el proceso Y SU ÁRBOL (ffmpeg, pases de síntesis).
+
+    El kill va en un hilo con un pequeño retardo para que el navegador reciba
+    primero la respuesta del botón (si no, la UI queda con el spinner colgado).
+    """
+    import logging
+    import os
+    import subprocess
+    import threading
+
+    def _kill() -> None:
+        time.sleep(delay)
+        pid = os.getpid()
+        log.info("Cierre pedido desde la UI: apagando Fuser (pid %s) y sus hijos.", pid)
+        logging.shutdown()  # vuelca el log a disco antes del os._exit
+        if os.name == "nt":
+            # /T incluye los hijos (ffmpeg, subprocesos de síntesis); el padre
+            # redirector del venv se cae solo al morir este proceso.
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=15)
+            except Exception:
+                pass
+        os._exit(0)
+
+    threading.Thread(target=_kill, daemon=True, name="fuser-shutdown").start()
+
+
+def _on_app_close(armed):
+    """Botón 🛑 Cerrar Fuser: pausa lo que corra en segundo plano y apaga la app.
+
+    Dos toques (armar → confirmar): un clic accidental no debe tirar abajo un
+    entrenamiento de días ni un vídeo a medio procesar.
+    """
+    from ..core import dfm_trainer
+    if not armed:
+        try:
+            live = dfm_trainer.running_trainings()
+        except Exception as exc:
+            log.warning("No pude listar los entrenamientos vivos: %s", exc)
+            live = []
+        detalle = (f"Se **pausa** el entrenamiento de **{', '.join(live)}** y se apaga el servidor."
+                   if live else "No hay entrenamientos en segundo plano; solo se apaga el servidor.")
+        return (True,
+                gr.update(value="⚠️ Confirmar cierre total", variant="stop"),
+                gr.update(value=f"⚠️ **Vas a cerrar Fuser por completo.** {detalle} "
+                                "Tocá otra vez para confirmar (o seguí usando la app para cancelar).",
+                          visible=True))
+    aviso = ""
+    try:
+        stopped = dfm_trainer.stop_all()
+    except Exception as exc:
+        stopped = []
+        aviso = f"⚠️ No pude pausar los entrenamientos: {exc}\n\n"
+    if stopped:
+        aviso += ("⏸️ Entrenamiento pausado: **" + ", ".join(stopped) + "**. DeepFaceLab autoguarda "
+                  "solo: lo retomás desde donde quedó con el mismo botón de entrenar.\n\n")
+    else:
+        aviso += "No había nada corriendo en segundo plano.\n\n"
+    _shutdown_now()
+    return (False,
+            gr.update(value="🛑 Cerrando…", interactive=False),
+            gr.update(value=aviso + "👋 **Fuser cerrado.** Ya podés cerrar esta ventana.",
+                      visible=True))
+
+
 def _on_trainer_tick(cara, auto):
     """Refresco AUTOMÁTICO (temporizador). No hace nada si está desactivado o
     si no hay modelo elegido: así el timer no pisa lo que estés mirando."""
@@ -544,11 +614,53 @@ def _deepswap_settings(dfm_id: str, mode: str) -> config.Settings:
     return s
 
 
+def _video_fingerprint(video_path: str) -> str:
+    """Huella corta y estable de un archivo de video (ruta + tamaño + mtime).
+
+    No lee el contenido (un video de 1 GB tardaría una eternidad): con esos tres
+    datos alcanza para que dos videos DISTINTOS nunca compartan carpeta de
+    trabajo, que es lo único que hace falta aquí.
+    """
+    p = Path(video_path)
+    try:
+        st = p.stat()
+        raw = f"{p.resolve()}|{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        raw = str(p)
+    return hashlib.sha1(raw.encode("utf-8", "surrogateescape")).hexdigest()[:10]
+
+
+def _part_is_complete(path: Path) -> bool:
+    """True si la parte del disco es un video TERMINADO y legible.
+
+    El chequeo anterior era ``tamaño > 1000`` bytes: un mp4 truncado (la app se
+    cayó a mitad de escribir la parte) pesa muchísimo más que eso y se daba por
+    bueno para siempre — al reanudar se saltaba esa parte y el video final salía
+    con un hueco. Abrimos el archivo y exigimos frames de verdad.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size <= 1000:
+            return False
+        cap = cv2.VideoCapture(str(path))
+        try:
+            return bool(cap.isOpened()) and int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) > 0
+        finally:
+            cap.release()
+    except Exception:
+        return False
+
+
 def _split_into_chunks(video_path: str, secs: int, out_dir: Path) -> List[Path]:
     """Corta el video en partes de ``secs`` con UNA pasada de ffmpeg (segment).
 
     Reencoda para que los cortes sean exactos (no depende de keyframes) y
-    conserva el audio de cada parte. Reusa lo ya cortado (mismo video + tamaño).
+    conserva el audio de cada parte.
+
+    Reusa lo ya cortado **solo si el manifiesto coincide** (mismo video y mismo
+    tamaño de parte). Antes se reusaba cualquier ``in_*.mp4`` que hubiera en la
+    carpeta: pedir 60 s donde antes se pidieron 30 —o mandar otro video que
+    cayera en la misma carpeta— devolvía los tramos VIEJOS, y el montaje seguía
+    un trabajo anterior en vez de empezar el nuevo.
     """
     import subprocess
 
@@ -558,9 +670,17 @@ def _split_into_chunks(video_path: str, secs: int, out_dir: Path) -> List[Path]:
     if not ff:
         raise gr.Error("FFmpeg no disponible.")
     out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = out_dir / "corte.json"
+    want = {"huella": _video_fingerprint(video_path), "secs": int(secs)}
     existing = sorted(out_dir.glob("in_*.mp4"))
     if existing:
-        return existing
+        try:
+            if json.loads(manifest.read_text("utf-8")) == want:
+                return existing
+        except Exception:
+            pass
+        for stale in existing:      # el corte guardado es de otro trabajo: no sirve
+            stale.unlink(missing_ok=True)
     # -force_key_frames: sin esto el muxer 'segment' solo corta en los keyframes
     # QUE YA TRAE el video (medido: pedir 3 s daba partes de 8 s). Forzamos un
     # keyframe exacto cada `secs` para que las partes salgan del tamaño pedido.
@@ -579,6 +699,7 @@ def _split_into_chunks(video_path: str, secs: int, out_dir: Path) -> List[Path]:
     parts = sorted(out_dir.glob("in_*.mp4"))
     if not parts:
         raise gr.Error("El corte no produjo partes (¿video ilegible?).")
+    manifest.write_text(json.dumps(want), "utf-8")
     return parts
 
 
@@ -670,6 +791,170 @@ def _on_set_backend(choice):
             f"pesos no dependen del motor).\n\n{_cuda_status_md()}")
 
 
+def _deepswap_job_dir(dfm_id: str, video_path: str, secs: int) -> Path:
+    """Carpeta de trabajo de UN montaje (partes de entrada y partes listas).
+
+    La clave incluye la HUELLA del video y el tamaño de parte, así que dos
+    trabajos distintos nunca comparten carpeta. Antes la clave era solo
+    (modelo, nombre del archivo recortado a 40 caracteres): mandar otro video de
+    nombre parecido —o el mismo video con otro tamaño de parte— caía en la
+    carpeta del trabajo anterior y el montaje lo *reanudaba*, escupiendo la
+    parte 2 de un corte viejo en vez de empezar el nuevo desde cero.
+    """
+    stem = Path(video_path).stem[:40]
+    tag = f"c{int(secs)}" if int(secs) > 0 else "entero"
+    return config.OUTPUTS_DIR / (
+        f"deepswap_{face_library._slug(dfm_id.split('/')[-1])}_{stem}"
+        f"_{_video_fingerprint(video_path)}_{tag}"
+    )
+
+
+def _join_parts(parts: List[str], out_stem: str, audio_from: str) -> Optional[str]:
+    """Une las partes en un solo mp4 en ``outputs/`` y le pega el audio original."""
+    if not parts:
+        return None
+    final = str(config.OUTPUTS_DIR / f"{out_stem}.mp4")
+    if not videoutil.concat_videos(parts, final, drop_seam=False, crf=12):
+        return None
+    try:
+        with_audio = str(config.OUTPUTS_DIR / f"{out_stem}_audio.mp4")
+        if videoutil.mux_audio(final, audio_from, with_audio):
+            return with_audio
+    except Exception:
+        log.warning("No pude remuxear el audio original", exc_info=True)
+    return final
+
+
+def _deepswap_montage(pipeline, dfm_id, video_path, secs, progress,
+                      *, label: str = "", base: float = 0.0, span: float = 1.0):
+    """Monta la cara del .dfm en UN video, parte por parte.
+
+    Generator: emite ``(última parte, archivos, estado)`` y **devuelve** la ruta
+    del video final (o del parcial si se detuvo, o None si no salió nada). Lo
+    usan tanto el botón de un video como la cola; ``base``/``span`` sitúan su
+    progreso dentro de una barra más grande (la de la cola).
+
+    Reanudable de verdad: cada parte se escribe en un temporal y solo se publica
+    con su nombre definitivo cuando terminó entera, así una parte a medias nunca
+    se confunde con una terminada.
+    """
+    import gc
+    import time as _t
+
+    stem = Path(video_path).stem[:40]
+    work = _deepswap_job_dir(dfm_id, video_path, secs)
+    parts_in = work / "partes_entrada"
+    parts_out = work / "partes_listas"
+    parts_out.mkdir(parents=True, exist_ok=True)
+
+    def bar(frac, desc):
+        progress(base + span * min(max(frac, 0.0), 1.0), desc=f"{label}{desc}")
+
+    if int(secs) <= 0:
+        chunks = [Path(video_path)]              # "video entero": una sola parte
+    else:
+        bar(0.01, "Cortando el video en partes…")
+        chunks = _split_into_chunks(video_path, int(secs), parts_in)
+    n = len(chunks)
+
+    _prepare(pipeline, None, str(chunks[0]), None)
+
+    done: list = []
+    spent = 0.0                      # tiempo real gastado (sin contar las salteadas)
+    computed = 0
+    cabecera = (f"▶️ **{n} partes** de {int(secs)} s. Procesando…" if int(secs) > 0
+                else "▶️ **Video entero** (sin partes). Procesando…")
+    yield None, [], f"{label}{cabecera}"
+
+    parcial: Optional[str] = None    # parte cortada a mitad por el botón de detener
+    for i, ch in enumerate(chunks):
+        out_path = parts_out / f"parte_{i + 1:04d}.mp4"
+        if _part_is_complete(out_path):
+            done.append(str(out_path))          # reanudación: ya estaba hecha
+            yield str(out_path), list(done), (
+                f"{label}⏩ Parte **{i + 1}/{n}** ya estaba lista (reanudando)…")
+            continue
+        if pipeline_core.stop_requested():
+            break
+
+        def cb(frac, msg="", _i=i):
+            bar(0.08 + 0.87 * (_i + frac) / n, f"Parte {_i + 1}/{n} · {msg}")
+
+        # Se renderiza a un temporal y se publica de una sola vez: si el proceso
+        # muere a mitad, queda el temporal (que se descarta), nunca una parte
+        # trunca haciéndose pasar por terminada.
+        tmp_out = parts_out / f"parte_{i + 1:04d}.enproceso.mp4"
+        tmp_out.unlink(missing_ok=True)
+        t_chunk = _t.time()
+        try:
+            pipeline.process_video(str(ch), output_path=str(tmp_out), progress=cb)
+        except Exception as exc:
+            tmp_out.unlink(missing_ok=True)
+            log.exception("Deep swap: falló la parte %d/%d", i + 1, n)
+            yield (done[-1] if done else None), list(done), (
+                f"{label}⚠️ La parte **{i + 1}/{n}** falló: {exc}\n\n"
+                f"Las **{len(done)}** partes anteriores quedaron guardadas. Volvé a darle "
+                f"al botón y retoma desde esta parte.")
+            return None
+        spent += _t.time() - t_chunk
+
+        if pipeline.interrupted:
+            # Parte cortada a mitad: sirve para entregarla ahora, pero NO se
+            # publica como terminada (al retomar hay que rehacerla entera).
+            parcial = str(tmp_out.with_name(f"parte_{i + 1:04d}.parcial.mp4"))
+            os.replace(tmp_out, parcial)
+            break
+
+        os.replace(tmp_out, out_path)           # publicación atómica de la parte
+        # si esta parte venía de una parada anterior, su recorte ya no hace falta
+        out_path.with_name(f"parte_{i + 1:04d}.parcial.mp4").unlink(missing_ok=True)
+        computed += 1
+        done.append(str(out_path))
+        gc.collect()                            # suelta los buffers de la parte
+
+        per = spent / max(1, computed)
+        eta = per * (n - i - 1)
+        yield str(out_path), list(done), (
+            f"{label}✅ Parte **{i + 1}/{n}** lista — miralá arriba para controlar la calidad.\n\n"
+            f"⏱️ {_fmt_eta(per)} por parte · faltan **{_fmt_eta(eta)}** ({n - i - 1} partes).\n\n"
+            f"*Podés frenar cuando quieras: lo hecho queda guardado y al volver a darle "
+            f"continúa desde acá.*")
+
+    detenido = pipeline_core.stop_requested()
+    # Si la parada llegó tan temprano que el recorte no llegó a tener frames, no
+    # sirve para unir (rompería el concat): se descarta y se entrega lo anterior.
+    if parcial and not _part_is_complete(Path(parcial)):
+        Path(parcial).unlink(missing_ok=True)
+        parcial = None
+    piezas = done + ([parcial] if parcial else [])
+    if detenido:
+        bar(0.99, "Guardando lo procesado…")
+        final = _join_parts(piezas, f"{stem}_deepswap_PARCIAL", video_path)
+        hechas = len(done) + (1 if parcial else 0)
+        if final:
+            yield final, piezas + [final], (
+                f"{label}⏹️ **Detenido.** Guardé el video hasta donde llegó "
+                f"({hechas} de {n} partes) en `{final}`.\n\n"
+                f"*Volvé a darle a montar y sigue desde la parte {len(done) + 1}.*")
+        else:
+            yield (piezas[-1] if piezas else None), piezas, (
+                f"{label}⏹️ **Detenido** con {hechas} de {n} partes hechas. La unión no salió; "
+                f"las partes sueltas están en `{parts_out}`.")
+        return final
+
+    bar(0.96, "Uniendo las partes…")
+    final = _join_parts(done, f"{stem}_deepswap", video_path)
+    if final:
+        yield final, done + [final], (
+            f"{label}🎉 **Video completo listo** ({n} partes unidas · "
+            f"{_fmt_eta(spent)} de proceso).\n\nLas partes sueltas quedan en `{parts_out}`.")
+    else:
+        yield (done[-1] if done else None), done, (
+            f"{label}⚠️ Las {n} partes están listas pero la unión falló. "
+            f"Las tenés todas en `{parts_out}` (podés unirlas a mano).")
+    return final
+
+
 def _on_deepswap_process(dfm_id, video_path, mode, chunk_secs, progress=gr.Progress()):
     """🎬 Montar la cara del modelo .dfm — POR PARTES, con vista en vivo.
 
@@ -681,85 +966,114 @@ def _on_deepswap_process(dfm_id, video_path, mode, chunk_secs, progress=gr.Progr
     darle, sigue donde quedó. VRAM/RAM al máximo (ver _deepswap_settings); el
     modelo se carga UNA sola vez para todas las partes.
     """
-    import time as _t
-
     if not dfm_id or dfm_id == NO_DFM:
         raise gr.Error("Elegí un modelo .dfm (crealo arriba, o importalo).")
     if not video_path:
         raise gr.Error("Subí el video donde montar la cara.")
 
+    pipeline_core.clear_stop()
     s = _deepswap_settings(dfm_id, mode)
-    stem = Path(video_path).stem[:40]
-    work = config.OUTPUTS_DIR / f"deepswap_{face_library._slug(dfm_id.split('/')[-1])}_{stem}"
-    parts_in = work / "partes_entrada"
-    parts_out = work / "partes_listas"
-    parts_out.mkdir(parents=True, exist_ok=True)
-
     try:
-        if int(chunk_secs or 0) <= 0:
-            chunks = [Path(video_path)]          # "video entero": una sola parte
-        else:
-            progress(0.01, desc="Cortando el video en partes…")
-            chunks = _split_into_chunks(video_path, int(chunk_secs), parts_in)
-        n = len(chunks)
-        progress(0.03, desc=f"{n} partes · cargando el modelo entrenado…")
-        pipeline = _get_pipeline(s, progress=lambda f, m="": progress(0.03 + f * 0.05, desc=m))
-        _prepare(pipeline, None, str(chunks[0]), None)
-
-        done: list = []
-        t0 = _t.time()
-        spent = 0.0                      # tiempo real gastado (sin las salteadas)
-        computed = 0
-        yield None, [], f"▶️ **{n} partes** de {int(chunk_secs)} s. Procesando…"
-
-        for i, ch in enumerate(chunks):
-            out_path = parts_out / f"parte_{i + 1:04d}.mp4"
-            if out_path.is_file() and out_path.stat().st_size > 1000:
-                done.append(str(out_path))          # reanudación: ya estaba hecha
-                yield str(out_path), done, (f"⏩ Parte **{i + 1}/{n}** ya estaba lista "
-                                            f"(reanudando)…")
-                continue
-
-            def cb(frac, msg="", _i=i):
-                overall = 0.08 + 0.87 * (_i + frac) / n
-                progress(overall, desc=f"Parte {_i + 1}/{n} · {msg}")
-
-            t_chunk = _t.time()
-            pipeline.process_video(str(ch), output_path=str(out_path), progress=cb)
-            spent += _t.time() - t_chunk
-            computed += 1
-            done.append(str(out_path))
-
-            per = spent / max(1, computed)
-            eta = per * (n - i - 1)
-            yield str(out_path), done, (
-                f"✅ Parte **{i + 1}/{n}** lista — miralá arriba para controlar la calidad.\n\n"
-                f"⏱️ {_fmt_eta(per)} por parte · faltan **{_fmt_eta(eta)}** ({n - i - 1} partes).\n\n"
-                f"*Podés frenar cuando quieras: lo hecho queda guardado y al volver a darle "
-                f"continúa desde acá.*")
-
-        progress(0.96, desc="Uniendo las partes…")
-        final = str(config.OUTPUTS_DIR / f"{stem}_deepswap.mp4")
-        merged = videoutil.concat_videos(done, final, drop_seam=False, crf=12)
-        if merged:
-            try:
-                with_audio = str(config.OUTPUTS_DIR / f"{stem}_deepswap_audio.mp4")
-                if videoutil.mux_audio(final, video_path, with_audio):
-                    final = with_audio
-            except Exception:
-                log.warning("No pude remuxear el audio original", exc_info=True)
-            yield final, done + [final], (
-                f"🎉 **Video completo listo** ({n} partes unidas · {_fmt_eta(spent)} de proceso).\n\n"
-                f"Las partes sueltas quedan en `{parts_out}`.")
-        else:
-            yield done[-1] if done else None, done, (
-                f"⚠️ Las {n} partes están listas pero la unión falló. "
-                f"Las tenés todas en `{parts_out}` (podés unirlas a mano).")
+        progress(0.02, desc="Cargando el modelo entrenado…")
+        pipeline = _get_pipeline(s, progress=lambda f, m="": progress(0.02 + f * 0.05, desc=m))
+        yield from _deepswap_montage(pipeline, dfm_id, video_path, int(chunk_secs or 0),
+                                     progress, base=0.07, span=0.93)
     except gr.Error:
         raise
     except Exception as exc:  # pragma: no cover
         log.exception("Deep swap falló")
         raise gr.Error(f"Error al montar: {exc}")
+
+
+def _on_deepswap_queue(dfm_id, video_queue, mode, chunk_secs, progress=gr.Progress()):
+    """⏭️ Monta el MISMO modelo .dfm en una COLA de videos, uno tras otro.
+
+    Mismo criterio que la cola de Face Swap (``_on_process_queue``): el modelo se
+    carga una sola vez, la cola va del video más corto al más largo, cada
+    resultado aparece en cuanto termina y un video que falla se manda al final
+    para reintentarlo (hasta ``QUEUE_MAX_ATTEMPTS``). Cada video se monta por
+    partes, así que el botón de detener también corta acá.
+    """
+    if not dfm_id or dfm_id == NO_DFM:
+        raise gr.Error("Elegí un modelo .dfm (crealo arriba, o importalo).")
+    videos = [v if isinstance(v, str) else getattr(v, "name", None) for v in (video_queue or [])]
+    videos = [v for v in videos if v]
+    if not videos:
+        raise gr.Error("Agregá al menos un video a la cola.")
+
+    pipeline_core.clear_stop()
+    s = _deepswap_settings(dfm_id, mode)
+    progress(0.0, desc="Cargando el modelo entrenado…")
+    pipeline = _get_pipeline(s, progress=lambda f, m="": progress(f * 0.05, desc=m))
+
+    videos = sorted(videos, key=_queue_duration_seconds)   # victorias rápidas primero
+    n = len(videos)
+    work = deque((v, 1) for v in videos)                   # (ruta, nº de intento)
+    listos: list = []
+    descartados: list = []
+    yield None, [], f"▶️ Cola de **{n}** videos (de más corto a más largo). Procesando…"
+
+    while work:
+        if pipeline_core.stop_requested():
+            break
+        vpath, attempt = work.popleft()
+        hechos = len(listos) + len(descartados)
+        etiqueta = f"[{hechos + 1}/{n}] **{Path(vpath).name}** · "
+        montaje = _deepswap_montage(
+            pipeline, dfm_id, vpath, int(chunk_secs or 0), progress,
+            label=etiqueta, base=0.05 + 0.95 * hechos / n, span=0.95 / n)
+        final = None
+        try:
+            # Se reemiten los avances del montaje SIN perder los videos ya
+            # terminados de la cola: la lista de descargas siempre los muestra.
+            while True:
+                vid, piezas, estado = next(montaje)
+                yield vid, list(listos) + list(piezas), estado
+        except StopIteration as fin:
+            final = fin.value
+        except Exception:  # pragma: no cover
+            # Incluye gr.Error (video ilegible, ffmpeg): un video malo se trata
+            # como fallo de ESE item, no tumba la cola entera.
+            log.exception("Cola deep swap: falló %s (intento %d)", vpath, attempt)
+        if pipeline_core.stop_requested():
+            if final:
+                listos.append(final)
+            break
+        if final:
+            listos.append(final)
+            yield final, list(listos), (
+                f"✅ {len(listos)}/{n} listos · terminé **{Path(vpath).name}**. Sigo…")
+        elif attempt < QUEUE_MAX_ATTEMPTS:
+            work.append((vpath, attempt + 1))       # al final de la cola, se reintenta luego
+            yield (listos[-1] if listos else None), list(listos), (
+                f"⚠️ Falló **{Path(vpath).name}**; lo mando al final de la cola "
+                f"(intento {attempt + 1}/{QUEUE_MAX_ATTEMPTS})…")
+        else:
+            descartados.append(Path(vpath).name)
+            yield (listos[-1] if listos else None), list(listos), (
+                f"❌ **{Path(vpath).name}** falló {QUEUE_MAX_ATTEMPTS} veces; lo descarto. Sigo…")
+
+    cola = f" · quedaron {len(work)} sin empezar" if work else ""
+    tail = f" · descartados ({len(descartados)}): {', '.join(descartados)}" if descartados else ""
+    if pipeline_core.stop_requested():
+        yield (listos[-1] if listos else None), list(listos), (
+            f"⏹️ **Cola detenida** con **{len(listos)}/{n}** videos guardados en `outputs/`"
+            f"{cola}. Volvé a darle a la cola y retoma donde quedó.")
+    else:
+        yield (listos[-1] if listos else None), list(listos), (
+            f"✅ Cola completa: **{len(listos)}/{n}** videos listos{tail}. Descargalos abajo.")
+
+
+def _on_deepswap_stop():
+    """⏹️ Detiene el montaje en curso y guarda el video hasta donde llegó.
+
+    Solo levanta la bandera: el bucle de frames la ve en el frame siguiente, sale
+    limpio, cierra bien el mp4 y el montaje une y guarda en ``outputs/`` lo
+    procesado. No mata nada, así que no se pierde ni una parte terminada.
+    """
+    pipeline_core.request_stop()
+    return ("⏹️ **Deteniendo…** termino el frame en curso, uno lo que ya está hecho y lo "
+            "guardo en `outputs/`. Puede tardar unos segundos.")
 
 
 def _on_save_face(name, files):
@@ -895,6 +1209,7 @@ def _on_preview(source_files, face_choice, dfm_choice, video_path, n_preview, *c
     # La cadena 2-pasadas solo existe en "Procesar video completo": en preview se
     # muestra la pasada de forma sola (aprox honesta y rápida), no un falso PRO.
     settings.chain_shape_then_texture = False
+    pipeline_core.clear_stop()   # una parada anterior no debe cortar la preview
     try:
         progress(0.02, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.4, desc=m))
@@ -995,6 +1310,7 @@ def _process_chain(base, source_files, face_choice, video_path, progress):
 def _on_process(source_files, face_choice, dfm_choice, video_path, *control_values, progress=gr.Progress()):
     settings = _build_settings(*control_values)
     _apply_dfm(settings, face_choice, dfm_choice)
+    pipeline_core.clear_stop()   # una parada anterior no debe cortar esta corrida
     try:
         # con Deep Swapper activo NO hay cadena (el .dfm ya es forma+textura)
         if getattr(settings, "chain_shape_then_texture", False) and not settings.ff_deep_swapper_model:
@@ -1122,6 +1438,7 @@ def _on_process_queue(source_files, face_choice, dfm_choice, video_queue, *contr
     """
     settings = _build_settings(*control_values)
     deep = _apply_dfm(settings, face_choice, dfm_choice)
+    pipeline_core.clear_stop()   # una parada anterior no debe cortar esta cola
     # La cadena 2-pasadas no está implementada por-item en la cola: correr una
     # pasada única real es más honesto que fingir el PRO.
     settings.chain_shape_then_texture = False
@@ -1413,6 +1730,9 @@ def build_interface() -> gr.Blocks:
             with gr.Column(scale=2):
                 system_md = gr.Markdown(format_system_summary(), elem_classes="fuser-soft")
                 refresh_btn = gr.Button("🔄 Actualizar estado del sistema", size="sm")
+                close_btn = gr.Button("🛑 Cerrar Fuser (apaga todo)", size="sm", variant="stop")
+                close_armed = gr.State(False)
+                close_md = gr.Markdown(visible=False, elem_classes="fuser-soft")
 
         # ===== Pestañas principales: Face Swap | Deep Swap ==================
         with gr.Tabs():
@@ -1843,6 +2163,27 @@ def build_interface() -> gr.Blocks:
                                  "controles la calidad sin esperar el video entero.",
                         )
                         ds_process_btn = gr.Button("🎬 MONTAR CARA EN EL VIDEO", variant="primary")
+                        ds_stop_btn = gr.Button(
+                            "⏹️ Detener y guardar lo hecho", variant="stop")
+                        gr.Markdown(
+                            "*Detener no tira nada: corta en el frame siguiente, une las partes "
+                            "terminadas y te deja el video hasta ahí en `outputs/`. Al volver a "
+                            "montar, sigue desde la parte que quedó a medias.*",
+                            elem_classes="fuser-soft",
+                        )
+                        with gr.Accordion("⏭️ Cola de videos (mismo modelo .dfm)", open=False):
+                            ds_queue = gr.Files(
+                                label="Videos a montar uno tras otro",
+                                file_count="multiple", file_types=["video"], type="filepath",
+                            )
+                            ds_queue_btn = gr.Button("⏭️ Procesar cola", variant="primary")
+                            gr.Markdown(
+                                "*Igual que la cola de Face Swap: el modelo se carga una sola vez, "
+                                "van del más corto al más largo, cada video aparece apenas termina "
+                                "y el que falla se reintenta al final. El botón de detener también "
+                                "corta la cola guardando lo hecho.*",
+                                elem_classes="fuser-soft",
+                            )
                         ds_output = gr.Video(label="👁️ Última parte terminada (mirá la calidad acá)")
                         ds_file = gr.Files(label="⬇️ Partes listas (y el video completo al final)")
                         ds_status = gr.Markdown("", elem_classes="fuser-soft")
@@ -1924,6 +2265,8 @@ def build_interface() -> gr.Blocks:
 
         # ----- Wiring (sin cambios) -----------------------------------------
         refresh_btn.click(_on_refresh_system, inputs=None, outputs=system_md)
+        close_btn.click(_on_app_close, inputs=close_armed,
+                        outputs=[close_armed, close_btn, close_md])
 
         expression_mode.change(
             _apply_expression_mode,
@@ -1981,6 +2324,14 @@ def build_interface() -> gr.Blocks:
             inputs=[ds_dfm_choice, ds_video, ds_mode, ds_chunk],
             outputs=[ds_output, ds_file, ds_status],
         )
+        ds_queue_btn.click(
+            _on_deepswap_queue,
+            inputs=[ds_dfm_choice, ds_queue, ds_mode, ds_chunk],
+            outputs=[ds_output, ds_file, ds_status],
+        )
+        # El botón de detener corre en su PROPIO evento (sin cola de Gradio) para
+        # que llegue mientras el montaje está ocupado renderizando.
+        ds_stop_btn.click(_on_deepswap_stop, inputs=None, outputs=ds_status, queue=False)
         # Pestaña "🚀 DeepFace CUDA" — mismas acciones, motor CUDA
         cu_resume_btn.click(_on_resume_cuda, inputs=cu_model, outputs=cu_result)
         cu_stop_btn.click(_on_trainer_stop, inputs=cu_model, outputs=cu_result)
