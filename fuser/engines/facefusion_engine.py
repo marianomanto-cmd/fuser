@@ -117,15 +117,17 @@ class FaceFusionSwapper(BaseFaceSwapper):
             return self._analyser
         from ..models.face_analyser import FaceAnalyser
 
-        # Suite RECORTADA: este analyser alimenta solo el post-procesado y la
-        # pasada 1 del modo 2 pasadas, que consumen kps/bbox/det_score (detection)
-        # y landmark_2d_106 (MAR de boca). ArcFace, landmark 3D y género/edad se
-        # tiraban a la basura en cada frame (3 inferencias por cara). El QC usa su
-        # PROPIA instancia completa (necesita embeddings) — no se toca. Este motor
-        # no implementa set_reference, así que nadie le pide embeddings.
+        # SUITE COMPLETA a propósito. Se probó recortarla con allowed_modules
+        # (solo detection+landmark_2d_106, para ahorrar 3 inferencias por cara)
+        # y en DirectML MATA EL PROCESO al cargar (caja negra 2026-07-26, 20:49:
+        # última línea "Cargando detector buffalo_l ... modulos=[...]" y muerte
+        # sin excepción; en CPU el mismo código pasa todos los tests). Causa
+        # probable: InsightFace crea las 5 sesiones del pack y LIBERA las no
+        # permitidas — y liberar sesiones en DML en esta GPU es el patrón
+        # prohibido (retención de VRAM / colgado silencioso, ver CLAUDE.md).
+        # NO recortar módulos mientras el provider sea DirectML.
         self._analyser = FaceAnalyser(self.mm.analyser_providers(), self.mm.ctx_id(),
-                                      self.mm.det_size,
-                                      modules=["detection", "landmark_2d_106"])
+                                      self.mm.det_size)
         self._analyser.load()
         return self._analyser
 
