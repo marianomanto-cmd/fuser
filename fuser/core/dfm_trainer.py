@@ -58,6 +58,56 @@ BUILD_URL = os.environ.get(
     "https://huggingface.co/datasets/dimanchkek/Deepfacelive-DFM-Models/resolve/main/Pre-builds/DeepFaceLab_DirectX12_build_05_04_2022.exe",
 )
 BUILD_SHA256 = "dd666c196e5053a57c6aad08caa870a5e85207c12dd4ed95f5b5718235febeda"  # 2.783.049.668 bytes
+
+# ---------------------------------------------------------------------------
+# MOTORES de entrenamiento (conviven; el usuario elige cuál usar)
+# ---------------------------------------------------------------------------
+#  dml  : DirectX12 — LENTO pero FUNCIONA seguro en esta GPU (el de siempre).
+#  cuda : build NVIDIA — ~3x más rápido SI arranca; es de 2021 (CUDA 11.x) y la
+#         4060 Ti es Ada, arquitectura posterior: hay freezes reportados en este
+#         mismo modelo de placa. Por eso NO reemplaza al dml: se prueba primero.
+BACKENDS = {
+    "dml": {
+        "label": "DirectX12 (estable)",
+        "url": BUILD_URL,
+        "sha256": BUILD_SHA256,
+        "exe": "DeepFaceLab_DirectX12_build_05_04_2022.exe",
+        "dir_glob": "DeepFaceLab_DirectX12*",
+    },
+    "cuda": {
+        "label": "NVIDIA CUDA (rápido, experimental)",
+        "url": os.environ.get(
+            "FUSER_DFL_CUDA_URL",
+            "https://huggingface.co/datasets/dimanchkek/Deepfacelive-DFM-Models/resolve/main/"
+            "Pre-builds/DeepFaceLab_NVIDIA_RTX3000_series_build_11_20_2021.exe"),
+        "sha256": "4ca31c30ca8f683a825a643e7090811d750c1250775537dcdb5c80d5f3b7f722",
+        "exe": "DeepFaceLab_NVIDIA_RTX3000_series_build_11_20_2021.exe",
+        "dir_glob": "DeepFaceLab_NVIDIA*",
+    },
+}
+DEFAULT_BACKEND = "dml"
+
+
+def _backend_file() -> Path:
+    return dfl_root() / "backend.txt"
+
+
+def active_backend() -> str:
+    """Motor elegido para los PRÓXIMOS entrenamientos (default: el estable)."""
+    try:
+        b = _backend_file().read_text(encoding="utf-8").strip()
+        return b if b in BACKENDS else DEFAULT_BACKEND
+    except OSError:
+        return DEFAULT_BACKEND
+
+
+def set_active_backend(backend: str) -> str:
+    if backend not in BACKENDS:
+        raise ValueError(f"Motor desconocido: {backend}")
+    dfl_root().mkdir(parents=True, exist_ok=True)
+    _backend_file().write_text(backend, encoding="utf-8")
+    log.info("Motor de entrenamiento activo: %s", backend)
+    return BACKENDS[backend]["label"]
 RTT_URL = os.environ.get(
     "FUSER_DFL_RTT_URL",
     "https://huggingface.co/datasets/dimanchkek/Deepfacelive-DFM-Models/resolve/main/Pretrained/RTT%20model%20224%20V2.zip",
@@ -77,14 +127,17 @@ PROGRESS_RE = re.compile(r"\[?#?(\d{4,9})\]?\[(\d+)ms\]\[([\d.]+)\]\[([\d.]+)\]"
 # ---------------------------------------------------------------------------
 # Rutas derivadas
 # ---------------------------------------------------------------------------
-def _paths() -> dict:
+def _paths(backend: Optional[str] = None) -> dict:
+    """Rutas del motor pedido (default: el activo). Los builds CONVIVEN."""
+    backend = backend if backend in BACKENDS else active_backend()
     root = dfl_root()
     build = root / "build"
-    # el autoextraíble crea una carpeta DeepFaceLab_DirectX12 adentro
-    inner = next((p for p in build.glob("DeepFaceLab*") if p.is_dir()), build)
+    glob_pat = BACKENDS[backend]["dir_glob"]
+    inner = next((p for p in build.glob(glob_pat) if p.is_dir()), build / glob_pat.rstrip("*"))
     internal = inner / "_internal"
     return {
         "root": root,
+        "backend": backend,
         "downloads": root / "downloads",
         "build": build,
         "internal": internal,
@@ -147,6 +200,21 @@ def rtm_ready() -> bool:
     if not d.is_dir():
         return False
     return any(d.rglob("faceset.pak")) or next(d.rglob("*.jpg"), None) is not None
+
+
+def backend_ready(backend: str) -> bool:
+    """¿Está instalado (descargado y descomprimido) ese motor?"""
+    p = _paths(backend)
+    return bool(_find_python(p) and _find_main(p))
+
+
+def backends_status() -> dict:
+    """Estado de TODOS los motores + cuál está activo (para la pestaña CUDA)."""
+    return {
+        "active": active_backend(),
+        "backends": {b: {"label": BACKENDS[b]["label"], "ready": backend_ready(b)}
+                     for b in BACKENDS},
+    }
 
 
 def status() -> dict:
@@ -297,15 +365,22 @@ def _seven_zip() -> Optional[Path]:
     return None
 
 
-def install(progress: Optional[Callable] = None) -> str:
-    """Instala el entrenador local: build DX12 + preentrenado RTT (una vez)."""
-    p = _paths()
+def install(progress: Optional[Callable] = None, backend: Optional[str] = None) -> str:
+    """Instala un motor de entrenamiento (+ el preentrenado RTT, compartido).
+
+    Los motores CONVIVEN en carpetas separadas: instalar CUDA no toca el
+    DirectX12 que ya funciona. ``backend`` default = el activo.
+    """
+    backend = backend if backend in BACKENDS else active_backend()
+    cfg = BACKENDS[backend]
+    p = _paths(backend)
     msgs = []
-    if not status()["build_ready"]:
-        exe = p["downloads"] / Path(BUILD_URL).name
-        _fetch_verified(BUILD_URL, exe, BUILD_SHA256, progress, "Build DeepFaceLab DX12:")
+    if not backend_ready(backend):
+        exe = p["downloads"] / cfg["exe"]
+        _fetch_verified(cfg["url"], exe, cfg["sha256"], progress,
+                        f"Build {cfg['label']}:")
         if progress:
-            progress(0.5, "Desempaquetando el build (~2.6 GB)…")
+            progress(0.5, "Desempaquetando el build (unos GB)…")
         p["build"].mkdir(parents=True, exist_ok=True)
         # el .exe es un 7-Zip SFX (verificado): extrae headless con -y -o<dir>;
         # si hay 7-Zip local, es aún más robusto.
@@ -317,7 +392,7 @@ def install(progress: Optional[Callable] = None) -> str:
             r = subprocess.run([str(exe), "-y", f"-o{p['build']}"], capture_output=True, timeout=3600)
         if r.returncode != 0:
             raise RuntimeError(f"No pude desempaquetar el build (rc={r.returncode}).")
-        msgs.append("build instalado")
+        msgs.append(f"build {cfg['label']} instalado")
     if not status()["rtt_ready"]:
         z = p["downloads"] / "RTT_model_224_V2.zip"
         _fetch_verified(RTT_URL, z, RTT_SHA256, progress, "Preentrenado RTT 224:")
@@ -333,19 +408,21 @@ def install(progress: Optional[Callable] = None) -> str:
         os.replace(staging, p["rtt"])
         (p["rtt"] / ".complete").write_text("ok", encoding="utf-8")
         msgs.append("preentrenado RTT listo")
-    st = status()
-    if not st["build_ready"]:
-        raise RuntimeError("El build quedó incompleto: no encuentro python embebido/main.py.")
-    _patch_trainer_autosave()
-    return "✅ Entrenador local instalado (" + ", ".join(msgs or ["ya estaba"]) + f") en {st['root']}"
+    if not backend_ready(backend):
+        raise RuntimeError(f"El build {cfg['label']} quedó incompleto: "
+                           f"no encuentro python embebido/main.py.")
+    _patch_trainer_autosave(backend=backend)
+    return (f"✅ Motor «{cfg['label']}» instalado ("
+            + ", ".join(msgs or ["ya estaba"]) + f") en {p['root']}")
 
 
 # ---------------------------------------------------------------------------
 # Subprocesos DFL
 # ---------------------------------------------------------------------------
 def _run_dfl(args: List[str], log_file: Path, cwd: Optional[Path] = None,
-             detach: bool = False, stdin_text: Optional[str] = None):
-    p = _paths()
+             detach: bool = False, stdin_text: Optional[str] = None,
+             backend: Optional[str] = None):
+    p = _paths(backend)
     py = _find_python(p)
     main = _find_main(p)
     if not (py and main):
@@ -687,14 +764,14 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
 AUTO_TARGET_ITERS = int(os.environ.get("FUSER_DFM_TARGET_ITERS", "400000"))
 
 
-def _patch_trainer_autosave(minutes: int = 5) -> None:
+def _patch_trainer_autosave(minutes: int = 5, backend: Optional[str] = None) -> None:
     """Acorta el autosave del Trainer de DFL (default 25 min → 5).
 
     Sin esto, pausar/exportar puede tirar hasta 25 min de entrenamiento (medido:
     465 iters perdidas — el modelo quedó en iter=1). Idempotente; corre en
     install() y como cinturón en start().
     """
-    main = _find_main(_paths())
+    main = _find_main(_paths(backend))
     if not main:
         return
     trainer = main.parent / "mainscripts" / "Trainer.py"
@@ -760,8 +837,17 @@ def _model_iter(model_dir: Path) -> int:
 RESUME_EXTRA_ITERS = int(os.environ.get("FUSER_DFM_RESUME_EXTRA", "100000"))
 
 
-def start(name: str) -> str:
+def start(name: str, backend: Optional[str] = None) -> str:
+    """Lanza (o retoma) el entrenamiento con el motor pedido (default: el activo).
+
+    Los motores son intercambiables sobre el MISMO modelo: los pesos son .npy de
+    numpy, no dependen del backend. Se puede entrenar en DirectX12 y seguir en
+    CUDA (o al revés) sin perder iteraciones.
+    """
     from ..core.face_library import _slug
+    backend = backend if backend in BACKENDS else active_backend()
+    if not backend_ready(backend):
+        raise ValueError(f"El motor «{BACKENDS[backend]['label']}» no está instalado.")
     slug = _slug(name)
     ws = workspace_of(slug)
     model = ws / "model"
@@ -781,7 +867,7 @@ def start(name: str) -> str:
     else:
         target = cur + (RESUME_EXTRA_ITERS if st.get("phase") == "done"
                         else AUTO_TARGET_ITERS)
-    _patch_trainer_autosave()  # cinturón: reinstalaciones/updates del build
+    _patch_trainer_autosave(backend=backend)  # cinturón: reinstalaciones del build
     # cinturón: modelos preparados antes de existir el preview también lo activan
     _patch_model_options(model, write_preview_history=True)
     if _model_iter(model) <= 1:      # recién sembrado del RTT y aún sin entrenar
@@ -805,12 +891,13 @@ def start(name: str) -> str:
         "--model-dir", str(model),
         "--model", "SAEHD",
         "--silent-start", "--no-preview",
-    ], logf, detach=True)
+    ], logf, detach=True, backend=backend)
     (ws.parent / "train.pid").write_text(str(proc.pid), encoding="utf-8")
     _write_state(slug, phase="training", name=name, target_iters=target,
-                 started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
-    return (f"🏋️ Entrenamiento lanzado (pid {proc.pid}, iter actual {cur:,} → objetivo "
-            f"{target:,}). Corre en segundo plano aunque cierres Fuser.")
+                 backend=backend, started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    return (f"🏋️ Entrenamiento lanzado con «{BACKENDS[backend]['label']}» (pid {proc.pid}, "
+            f"iter actual {cur:,} → objetivo {target:,}). Corre en segundo plano aunque "
+            f"cierres Fuser.")
 
 
 def _pid_of(slug: str) -> Optional[int]:
@@ -927,6 +1014,57 @@ def stop(name: str) -> str:
             "Podés retomarlo cuando quieras (mismo botón de entrenar).")
 
 
+def test_backend(backend: str, slug: str = "q_stock", minutes: int = 8,
+                 progress: Optional[Callable] = None) -> dict:
+    """Prueba si un motor ENTRENA de verdad en esta GPU (o se cuelga).
+
+    Corre un entrenamiento corto sobre un workspace YA preparado (por defecto el
+    de stock) y mide si el contador de iteraciones avanza. El build CUDA es de
+    2021 y esta placa es Ada: el modo de falla conocido es quedarse colgado tras
+    cargar los datos, sin consumir GPU — por eso el criterio es "avanzó o no".
+
+    Devuelve {ok, iters, ms_iter, detail}. NO toca el entrenamiento del usuario:
+    usá un slug de prueba distinto al suyo.
+    """
+    if not backend_ready(backend):
+        return {"ok": False, "iters": 0, "ms_iter": None,
+                "detail": f"El motor «{BACKENDS[backend]['label']}» no está instalado."}
+    ws = workspace_of(slug)
+    if not (ws / "model").is_dir() or not any((ws / "data_src" / "aligned").glob("*.jpg")):
+        return {"ok": False, "iters": 0, "ms_iter": None,
+                "detail": f"No hay workspace de prueba preparado en «{slug}»."}
+    if is_running(slug):
+        return {"ok": False, "iters": 0, "ms_iter": None,
+                "detail": "Ese workspace ya está entrenando."}
+
+    base = _model_iter(ws / "model")
+    msg = start(slug, backend=backend)
+    log.info("test_backend(%s): %s", backend, msg)
+    deadline = time.time() + minutes * 60
+    last = {"iter": None, "ms": None}
+    try:
+        while time.time() < deadline:
+            time.sleep(20)
+            info = progress_info(slug)
+            last = {"iter": info["iter"], "ms": info["ms"]}
+            if progress:
+                el = int(time.time() - (deadline - minutes * 60))
+                progress(min(0.95, el / (minutes * 60)),
+                         f"Probando {BACKENDS[backend]['label']}: iter={info['iter']}…")
+            if info["iter"] and info["iter"] > 10:
+                break                     # avanzó de verdad: alcanza para saber
+            if not info["running"]:
+                break                     # murió (crash a la vista en el log)
+    finally:
+        stop(slug)
+    ok = bool(last["iter"] and last["iter"] > 10)
+    detail = ("Entrena correctamente." if ok else
+              "NO avanzó (el build se cuelga o falla en esta GPU). "
+              f"Mirá {ws.parent / 'train.log'}.")
+    return {"ok": ok, "iters": last["iter"] or 0, "ms_iter": last["ms"],
+            "detail": detail, "base_iter": base}
+
+
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
@@ -937,11 +1075,19 @@ def export(name: str, timeout: int = 1800) -> Path:
     model = ws / "model"
     if is_running(slug):
         raise ValueError("Pará el entrenamiento antes de exportar.")
+    # exportdfm corre en CPU: sirve cualquier motor INSTALADO (preferimos el que
+    # entrenó este modelo; si no está, el activo o el primero disponible).
+    be = _read_state(slug).get("backend")
+    if not backend_ready(be or ""):
+        be = active_backend() if backend_ready(active_backend()) else \
+            next((b for b in BACKENDS if backend_ready(b)), None)
+    if be is None:
+        raise ValueError("No hay ningún motor de entrenamiento instalado.")
     with _EXPORT_LOCK:  # nunca dos exportdfm sobre el mismo model-dir
         logf = ws.parent / "export.log"
         t0 = time.time()
         proc = _run_dfl(["exportdfm", "--model-dir", str(model), "--model", "SAEHD"],
-                        logf, stdin_text="\n" * 4)
+                        logf, stdin_text="\n" * 4, backend=be)
         try:
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:

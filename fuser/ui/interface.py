@@ -539,6 +539,70 @@ def _fmt_eta(secs: float) -> str:
     return f"{h} h {m:02d} min" if h else f"{m} min"
 
 
+def _cuda_status_md() -> str:
+    """Estado de los dos motores de entrenamiento (pestaña DeepFace CUDA)."""
+    from ..core import dfm_trainer
+    try:
+        st = dfm_trainer.backends_status()
+    except Exception as exc:
+        return f"⚠️ {exc}"
+    lines = []
+    for b, info in st["backends"].items():
+        mark = "✅ instalado" if info["ready"] else "⏳ no instalado"
+        act = " ← **EN USO**" if b == st["active"] else ""
+        lines.append(f"- **{info['label']}**: {mark}{act}")
+    return "### Motores de entrenamiento\n" + "\n".join(lines)
+
+
+def _on_install_cuda(progress=gr.Progress()):
+    from ..core import dfm_trainer
+    try:
+        progress(0.01, desc="Descargando el motor CUDA (3,7 GB, se reanuda si se corta)…")
+        msg = dfm_trainer.install(progress=lambda f, m="": progress(min(f, 0.99), desc=m),
+                                  backend="cuda")
+    except Exception as exc:
+        log.exception("Instalación de CUDA falló")
+        return f"⚠️ {exc}\n\n{_cuda_status_md()}"
+    return f"{msg}\n\n{_cuda_status_md()}\n\nAhora probalo con **🧪 Probar CUDA**."
+
+
+def _on_test_cuda(progress=gr.Progress()):
+    """Prueba si el motor CUDA entrena en esta GPU (usa el workspace de stock)."""
+    from ..core import dfm_trainer
+    try:
+        res = dfm_trainer.test_backend(
+            "cuda", progress=lambda f, m="": progress(f, desc=m))
+    except Exception as exc:
+        log.exception("Test de CUDA falló")
+        return f"⚠️ {exc}\n\n{_cuda_status_md()}"
+    if res["ok"]:
+        ms = res.get("ms_iter")
+        comp = ""
+        if ms:
+            comp = (f"\n\n⚡ **{ms} ms por iteración**. El DirectX12 anda por ~3.500 ms: "
+                    f"si este número es bastante menor, te conviene cambiar de motor "
+                    f"(un entrenamiento de 19 días podría bajar a ~{max(1, round(19*ms/3500))} días).")
+        return (f"### ✅ CUDA FUNCIONA en esta placa\n\n{res['detail']} "
+                f"Llegó a {res['iters']} iteraciones.{comp}\n\n"
+                f"Para usarlo: elegí **NVIDIA CUDA** abajo y arrancá (o retomá) un "
+                f"entrenamiento.\n\n{_cuda_status_md()}")
+    return (f"### ❌ CUDA no funciona acá\n\n{res['detail']}\n\n"
+            f"Es el problema esperado: el build es de 2021 y esta placa es más nueva. "
+            f"Seguimos con **DirectX12**, que es más lento pero anda seguro.\n\n"
+            f"{_cuda_status_md()}")
+
+
+def _on_set_backend(choice):
+    from ..core import dfm_trainer
+    try:
+        label = dfm_trainer.set_active_backend(choice)
+    except Exception as exc:
+        return f"⚠️ {exc}\n\n{_cuda_status_md()}"
+    return (f"✅ Motor activo: **{label}**. Se usa en el próximo entrenamiento que "
+            f"arranques o retomes (los modelos ya entrenados siguen sirviendo: los "
+            f"pesos no dependen del motor).\n\n{_cuda_status_md()}")
+
+
 def _on_deepswap_process(dfm_id, video_path, mode, chunk_secs, progress=gr.Progress()):
     """🎬 Montar la cara del modelo .dfm — POR PARTES, con vista en vivo.
 
@@ -1710,6 +1774,39 @@ def build_interface() -> gr.Blocks:
                         ds_file = gr.Files(label="⬇️ Partes listas (y el video completo al final)")
                         ds_status = gr.Markdown("", elem_classes="fuser-soft")
 
+            with gr.Tab("🚀 DeepFace CUDA"):
+                gr.Markdown(
+                    "Dos motores de entrenamiento **conviven**: podés probar el rápido sin perder "
+                    "el que ya funciona.\n\n"
+                    "- **DirectX12 (estable)** — el que estás usando. Lento (~3,5 s/iteración) "
+                    "pero anda seguro en esta placa.\n"
+                    "- **NVIDIA CUDA (experimental)** — hasta ~3× más rápido *si arranca*. El "
+                    "build disponible es de 2021 y esta GPU es posterior (Ada): el modo de falla "
+                    "conocido es quedarse colgado tras cargar los datos. Por eso hay que probarlo.\n\n"
+                    "Los pesos del modelo **no dependen del motor**: podés entrenar en uno y "
+                    "seguir en el otro sin perder iteraciones."
+                )
+                cu_status = gr.Markdown(_cuda_status_md(), elem_classes="fuser-soft")
+                with gr.Row():
+                    cu_install_btn = gr.Button("⬇️ Instalar motor CUDA (3,7 GB)", variant="secondary")
+                    cu_test_btn = gr.Button("🧪 Probar CUDA en esta placa", variant="primary")
+                gr.Markdown(
+                    "⚠️ **La prueba usa la GPU** unos minutos con material de stock. Si tenés un "
+                    "entrenamiento corriendo, va a competir con él: pausalo antes o probá cuando "
+                    "esté libre. No toca tus modelos ni tus videos.",
+                    elem_classes="fuser-soft",
+                )
+                cu_result = gr.Markdown("", elem_classes="fuser-soft")
+                gr.Markdown("### Motor a usar en los próximos entrenamientos")
+                cu_backend = gr.Radio(
+                    choices=[("DirectX12 — estable (recomendado)", "dml"),
+                             ("NVIDIA CUDA — rápido (solo si la prueba dio OK)", "cuda")],
+                    value="dml", label="Motor activo",
+                    info="Aplica al próximo entrenamiento que arranques o retomes. "
+                         "Lo que ya está corriendo no se toca.",
+                )
+                cu_apply_btn = gr.Button("✅ Usar este motor", variant="secondary")
+
         # ----- Orden EXACTO = firma de _build_settings -----------------------
         control_inputs = [
             engine, ff_swapper_model, ff_pixel_boost,
@@ -1782,6 +1879,10 @@ def build_interface() -> gr.Blocks:
             inputs=[ds_dfm_choice, ds_video, ds_mode, ds_chunk],
             outputs=[ds_output, ds_file, ds_status],
         )
+        # Pestaña "🚀 DeepFace CUDA" — instalar / probar / elegir motor
+        cu_install_btn.click(_on_install_cuda, inputs=None, outputs=cu_result)
+        cu_test_btn.click(_on_test_cuda, inputs=None, outputs=cu_result)
+        cu_apply_btn.click(_on_set_backend, inputs=cu_backend, outputs=cu_result)
 
         preview_btn.click(
             _on_preview,
