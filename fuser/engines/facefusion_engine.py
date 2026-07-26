@@ -810,7 +810,9 @@ class FaceFusionSwapper(BaseFaceSwapper):
     def render(self, frame: np.ndarray, targets):
         if not self._loaded:
             self.load()
-        if self._source_face is None:
+        # Con Deep Swapper (.dfm) la identidad está HORNEADA en el modelo: no hay
+        # cara fuente y no debe exigirse (mismo criterio que process_frame:752).
+        if self._source_face is None and not self._deep_swapper_active():
             raise RuntimeError("Falta la cara fuente (FaceFusion). Sube imágenes fuente primero.")
         out = self._ff_swap(frame)
         return self._postprocess(out, targets, original=frame)
