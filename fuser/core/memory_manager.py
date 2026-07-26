@@ -167,6 +167,13 @@ class MemoryManager:
         cfg = self._engine_cfg()
         frac = prof["buffer"] * cfg["buffer_mult"]
         cap = int(prof["buffer_cap"] * cfg["buffer_cap_mult"])
+        # Tope duro ADEMÁS del perfil: la cola solo sirve para que el decodificador
+        # vaya por delante de la GPU, y el decodificador es ~100× más rápido — con
+        # unos cientos de frames de ventaja la GPU jamás espera. Más que eso es RAM
+        # quemada sin retorno: medido 2026-07-26, el perfil máximo daba colas de
+        # 3.165 frames (~20 GB a 1080p) que se LLENAN enteras porque el swap tarda
+        # segundos por frame. 480 frames ≈ 3 GB a 1080p y >20 s de ventaja.
+        cap = min(cap, 480)
         h, w = frame_shape[:2]
         frame_mb = (h * w * 3) / (1024 ** 2)
         if frame_mb <= 0:

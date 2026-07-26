@@ -69,6 +69,50 @@ def free_swap_vram() -> None:
 QUEUE_MAX_ATTEMPTS = 2
 
 
+def _bg_status_md() -> str:
+    """🚦 Semáforo de procesos de fondo, siempre visible en la cabecera.
+
+    Muestra si hay un entrenamiento DFL vivo (son subprocesos desacoplados:
+    sobreviven a cierres/reinicios de la app, así que es fácil olvidar que
+    existen — y con la GPU tomada, montar tira abajo la app). Lo refresca un
+    gr.Timer; una sola consulta barrida a Windows por tick (_live_train_pids).
+    """
+    from ..core import dfm_trainer
+    try:
+        vivos = dfm_trainer.running_trainings()
+    except Exception as exc:  # pragma: no cover
+        return f"⚠️ No pude consultar los procesos de fondo: {exc}"
+    if vivos:
+        nombres = ", ".join(f"«{n}»" for n in vivos)
+        return (f"🔴 **Fondo: ENTRENANDO a {nombres}** — la GPU está tomada "
+                f"(~7,6/8,2 GB). ⏸️ Pausá antes de montar o la app se cae.")
+    return "🟢 **Fondo: GPU libre** — sin entrenamientos corriendo; podés montar."
+
+
+def _ensure_gpu_libre(accion: str = "el montaje") -> None:
+    """Bloquea las acciones de GPU (montaje/preview/cola) si hay un entrenamiento vivo.
+
+    Con el optimizador en GPU, un entrenamiento DFL ocupa ~7,6 de los 8,2 GB de
+    VRAM. Si en ese estado se intenta un swap, DirectML no puede reservar memoria
+    al cargar los modelos y MATA EL PROCESO ENTERO sin excepción de Python — el
+    usuario ve "Broken Connection" y la app muerta (pasó 2026-07-26, dos veces,
+    con el crash capturado justo en la carga del detector). Mejor un mensaje
+    claro ANTES de tocar la GPU.
+    """
+    from ..core import dfm_trainer
+    try:
+        vivos = dfm_trainer.running_trainings()
+    except Exception:
+        vivos = []
+    if vivos:
+        raise gr.Error(
+            f"La GPU está entrenando a «{vivos[0]}» (usa casi toda la VRAM) y "
+            f"lanzar {accion} en ese estado tira abajo la app entera. "
+            f"Pausá el entrenamiento (⏸️ en su pestaña), hacé {accion}, y "
+            f"retomalo después: el autoguardado cada 5 min hace que pierdas "
+            f"minutos, no horas.")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -988,6 +1032,7 @@ def _on_deepswap_process(dfm_id, video_path, mode, chunk_secs, progress=gr.Progr
         raise gr.Error("Elegí un modelo .dfm (crealo arriba, o importalo).")
     if not video_path:
         raise gr.Error("Subí el video donde montar la cara.")
+    _ensure_gpu_libre("el montaje")
 
     pipeline_core.clear_stop()
     s = _deepswap_settings(dfm_id, mode)
@@ -1018,6 +1063,7 @@ def _on_deepswap_queue(dfm_id, video_queue, mode, chunk_secs, progress=gr.Progre
     videos = [v for v in videos if v]
     if not videos:
         raise gr.Error("Agregá al menos un video a la cola.")
+    _ensure_gpu_libre("la cola de montajes")
 
     pipeline_core.clear_stop()
     s = _deepswap_settings(dfm_id, mode)
@@ -1228,6 +1274,7 @@ def _on_preview(source_files, face_choice, dfm_choice, video_path, n_preview, *c
     # muestra la pasada de forma sola (aprox honesta y rápida), no un falso PRO.
     settings.chain_shape_then_texture = False
     pipeline_core.clear_stop()   # una parada anterior no debe cortar la preview
+    _ensure_gpu_libre("la previsualización")
     try:
         progress(0.02, desc="Cargando modelos…")
         pipeline = _get_pipeline(settings, progress=lambda f, m="": progress(f * 0.4, desc=m))
@@ -1256,6 +1303,7 @@ def _on_compare(source_files, face_choice, video_path, models, n_cmp, *control_v
     models = [m for m in (models or [])]
     if len(models) < 2:
         raise gr.Error("Elegí al menos 2 modelos para comparar.")
+    _ensure_gpu_libre("la comparación de modelos")
 
     from ..core.compare import compare_models
     try:
@@ -1329,6 +1377,7 @@ def _on_process(source_files, face_choice, dfm_choice, video_path, *control_valu
     settings = _build_settings(*control_values)
     _apply_dfm(settings, face_choice, dfm_choice)
     pipeline_core.clear_stop()   # una parada anterior no debe cortar esta corrida
+    _ensure_gpu_libre("el procesado del video")
     try:
         # con Deep Swapper activo NO hay cadena (el .dfm ya es forma+textura)
         if getattr(settings, "chain_shape_then_texture", False) and not settings.ff_deep_swapper_model:
@@ -1457,6 +1506,7 @@ def _on_process_queue(source_files, face_choice, dfm_choice, video_queue, *contr
     settings = _build_settings(*control_values)
     deep = _apply_dfm(settings, face_choice, dfm_choice)
     pipeline_core.clear_stop()   # una parada anterior no debe cortar esta cola
+    _ensure_gpu_libre("la cola de videos")
     # La cadena 2-pasadas no está implementada por-item en la cola: correr una
     # pasada única real es más honesto que fingir el PRO.
     settings.chain_shape_then_texture = False
@@ -1746,6 +1796,9 @@ def build_interface() -> gr.Blocks:
             with gr.Column(scale=3):
                 gr.Markdown(HEADER_MD)
             with gr.Column(scale=2):
+                # 🚦 SIEMPRE visible: ¿hay un entrenamiento de fondo con la GPU?
+                bg_status_md = gr.Markdown(_bg_status_md(), elem_classes="fuser-soft")
+                bg_timer = gr.Timer(20.0)
                 system_md = gr.Markdown(format_system_summary(), elem_classes="fuser-soft")
                 refresh_btn = gr.Button("🔄 Actualizar estado del sistema", size="sm")
                 close_btn = gr.Button("🛑 Cerrar Fuser (apaga todo)", size="sm", variant="stop")
@@ -2296,6 +2349,10 @@ def build_interface() -> gr.Blocks:
 
         # ----- Wiring (sin cambios) -----------------------------------------
         refresh_btn.click(_on_refresh_system, inputs=None, outputs=system_md)
+        # 🚦 semáforo de fondo: refresco periódico + al pausar/retomar entrenamientos
+        bg_timer.tick(_bg_status_md, inputs=None, outputs=bg_status_md)
+        for _btn in (cm_stop_btn, cm_resume_btn, cu_stop_btn, cu_resume_btn):
+            _btn.click(_bg_status_md, inputs=None, outputs=bg_status_md)
         close_btn.click(_on_app_close, inputs=close_armed,
                         outputs=[close_armed, close_btn, close_md])
 
