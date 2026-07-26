@@ -434,10 +434,17 @@ def _run_dfl(args: List[str], log_file: Path, cwd: Optional[Path] = None,
     env["INTERNAL"] = str(internal)
     env["DFL_ROOT"] = str(main.parent)
     env["PYTHONPATH"] = str(main.parent)
-    env["PATH"] = os.pathsep.join([
-        str(py.parent), str(py.parent / "Scripts"),
-        str(internal / "ffmpeg"), env.get("PATH", ""),
-    ])
+    # PATH según el setenv.bat del build. Las carpetas CUDA/CUDNN son OBLIGATORIAS:
+    # sin ellas TensorFlow no encuentra cudart64_110.dll/cudnn64_8.dll, imprime
+    # "Skipping registering GPU devices" y entrena EN CPU (medido: 20-30 s/iter
+    # contra 3 s de DirectX12). Era la causa real del "CUDA es lentísimo".
+    path_parts = [str(py.parent), str(py.parent / "Scripts")]
+    for sub in ("CUDA", "CUDNN", "CUDNN/Win10.0", "CUDNN/Win6.x"):
+        d = internal / sub
+        if d.is_dir():
+            path_parts.append(str(d))
+    path_parts += [str(internal / "ffmpeg"), env.get("PATH", "")]
+    env["PATH"] = os.pathsep.join(path_parts)
     env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     if p["backend"] == "cuda":
         # MEDIDO: el build trae CUDA 11.0 (cudart64_110.dll), que solo tiene
