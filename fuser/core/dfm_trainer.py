@@ -458,6 +458,11 @@ def _run_dfl(args: List[str], log_file: Path, cwd: Optional[Path] = None,
         env["CUDA_CACHE_MAXSIZE"] = str(4 * 1024 ** 3)   # 4 GB (default ~256 MB)
         env["CUDA_CACHE_DISABLE"] = "0"
         env.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
+        # El allocator de memoria HOST ANCLADA (gpu_host_bfc) tiene un tope chico
+        # por defecto y revienta con "OOM shape[25088,512] ... device:CPU:0" al
+        # construir el grafo del optimizador (medido, incluso con el optimizador
+        # en GPU). Con 40 GB de RAM podemos darle 12 GB sin drama.
+        env.setdefault("TF_GPU_HOST_MEM_LIMIT_IN_MB", "12288")
     cmd = [str(py), str(main)] + args
     log_file.parent.mkdir(parents=True, exist_ok=True)
     lf = open(log_file, "ab")
