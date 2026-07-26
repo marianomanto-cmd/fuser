@@ -893,7 +893,12 @@ def start(name: str, backend: Optional[str] = None) -> str:
                         else AUTO_TARGET_ITERS)
     _patch_trainer_autosave(backend=backend)  # cinturón: reinstalaciones del build
     # cinturón: modelos preparados antes de existir el preview también lo activan
-    _patch_model_options(model, write_preview_history=True)
+    # + el optimizador se ubica SEGÚN EL MOTOR: en RAM ahorra VRAM y con DirectX12
+    # anda bien, pero en CUDA esa memoria es HOST ANCLADA (allocator gpu_host_bfc)
+    # con cupo chico y revienta con "OOM shape[25088,512] ... device:CPU:0" en el
+    # optimizador (medido). En CUDA va en la GPU.
+    _patch_model_options(model, write_preview_history=True,
+                         models_opt_on_gpu=(_paths(backend)["backend"] == "cuda"))
     if _model_iter(model) <= 1:      # recién sembrado del RTT y aún sin entrenar
         _reset_preview_samples(model)
     # cinturón: un .dfm dentro de model/ CONGELA el resume (workspaces viejos)
