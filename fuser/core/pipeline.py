@@ -85,20 +85,26 @@ class SwapPipeline:
         self.interrupted = False
 
     # ----- swap de un frame (motor + post-fx fotométrico) ----------------------
-    def _swap_frame(self, frame: np.ndarray, use_smoothing: bool) -> np.ndarray:
-        """Único punto de swap: motor + armonización LAB opcional (modo MÁXIMO).
+    def _apply_postfx(self, original: np.ndarray, out: np.ndarray) -> np.ndarray:
+        """Armonización LAB post-swap (si ``color_harmonize``), común a AMBOS flujos.
 
         La armonización compara el frame ANTES/DESPUÉS para localizar la huella
         del pegado e igualar tono/iluminación al original (ver core/postfx.py).
         Corre en CPU (~ms/frame) y degrada con gracia: si falla, devuelve el
         swap sin corregir y avisa UNA vez (sin spamear el log por frame).
+
+        Tiene que llamarse tanto en 1 pasada como en 2: antes vivía solo dentro
+        de _swap_frame y el recorrido de 2 pasadas (el del montaje Deep Swap)
+        escribía engine.render() directo, así que los presets con
+        color_harmonize=True lo prometían y NO corría — y peor, los pocos frames
+        corregidos por el QC sí lo recibían (vía _swap_frame), dejando parches
+        tonales entre frames vecinos.
         """
-        out = self.engine.process_frame(frame, use_smoothing=use_smoothing)
         s = self.settings
         if getattr(s, "color_harmonize", False) and out is not None:
             try:
                 out = postfx.harmonize_swap(
-                    frame, out,
+                    original, out,
                     strength=float(getattr(s, "color_harmonize_strength", 0.8)),
                 )
             except Exception as exc:  # pragma: no cover
@@ -106,6 +112,11 @@ class SwapPipeline:
                     self._postfx_warned = True
                     log.warning("Armonización de color desactivada (falló: %s)", exc)
         return out
+
+    def _swap_frame(self, frame: np.ndarray, use_smoothing: bool) -> np.ndarray:
+        """Único punto de swap frame-a-frame: motor + armonización opcional."""
+        out = self.engine.process_frame(frame, use_smoothing=use_smoothing)
+        return self._apply_postfx(frame, out)
 
     # ----- carga de modelos ----------------------------------------------------
     def load_models(self, progress: ProgressCb = None) -> None:
@@ -328,8 +339,15 @@ class SwapPipeline:
 
         if progress:
             progress(0.0, "🔍 Segunda pasada: analizando defectos…")
-        analyser = FaceAnalyser(self.mm.analyser_providers(), self.mm.ctx_id(), self.mm.det_size)
-        analyser.load()
+        # Analyser CACHEADO en el pipeline: el chunker llama process_video una vez
+        # por parte y esto cargaba 5 sesiones ONNX nuevas por parte sin liberar
+        # nunca las anteriores (churn de sesiones que DirectML castiga reteniendo
+        # VRAM). El pipeline vive cacheado entre partes → una sola carga.
+        analyser = getattr(self, "_qc_analyser", None)
+        if analyser is None:
+            analyser = FaceAnalyser(self.mm.analyser_providers(), self.mm.ctx_id(), self.mm.det_size)
+            analyser.load()
+            self._qc_analyser = analyser
         metrics = qc_pass.analyze(
             orig, swap, analyser,
             progress=lambda f, m="": progress and progress(0.45 * f, m),
@@ -533,7 +551,8 @@ class SwapPipeline:
                 if stop_requested():   # detener: lo escrito hasta aquí ya es un vídeo válido
                     return False
                 targets = self.engine.select_targets(faces)
-                writer.write(self.engine.render(fr, targets))
+                out = self.engine.render(fr, targets)
+                writer.write(self._apply_postfx(fr, out))
                 rendered += 1
                 emit()
             return True

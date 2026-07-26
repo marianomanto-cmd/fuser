@@ -421,6 +421,20 @@ def _on_create_dfm(name, files, person_videos, dst_videos, progress=gr.Progress(
     name = (name or "").strip()
     if not name:
         raise gr.Error("Poné un nombre para el modelo (p.ej. 'Cara 1').")
+    # Guarda TEMPRANA de GPU ocupada: el curado y la síntesis también corren en
+    # la GPU (ONNX/DirectML) y el entrenamiento final ni entra en VRAM si ya hay
+    # otro activo. Sin esto, el usuario quema 10+ min de preparación para morir
+    # al final con un "Resource exhausted" críptico (visto 2026-07-26).
+    try:
+        ocupada = [n for n in dfm_trainer.running_trainings()
+                   if face_library._slug(n) != face_library._slug(name)]
+    except Exception:
+        ocupada = []
+    if ocupada:
+        raise gr.Error(
+            f"La GPU ya está entrenando a «{ocupada[0]}»: en esta placa solo entra "
+            f"UN entrenamiento a la vez. Pausalo primero (⏸️) y volvé a darle acá. "
+            f"No perdés tiempo total: dos a la vez irían a menos de la mitad cada uno.")
     st = dfm_trainer.status()
     if not (st["build_ready"] and st["rtt_ready"]):
         progress(0.0, desc="Instalando el entrenador local (descarga única, puede tardar)…")
@@ -607,6 +621,10 @@ def _deepswap_settings(dfm_id: str, mode: str) -> config.Settings:
     s.chain_shape_then_texture = False          # el .dfm ya es forma+textura
     s.ff_deep_swapper_model = dfm_id
     s.skin_detail = 0.0                          # no reinyectar textura del video
+    # En perfiles, el blending de bordes mezcla mandíbula/oreja de vuelta hacia
+    # el VIDEO (default 0.5) — con un .dfm eso deshace justo la geometría que el
+    # modelo aprendió a imponer. La máscara box con blur ya funde los bordes.
+    s.profile_blending_strength = 0.0
     s.ram_mode = config.RAM_MAX                  # 40 GB de RAM al servicio del swap
     s.memory_mode = config.MODE_MAX_QUALITY      # arena de VRAM grande
     s.gpu_mem_limit_gb = config.MEMORY_PRESETS[config.MODE_MAX_QUALITY]["gpu_mem_limit_gb"]
@@ -2146,12 +2164,25 @@ def build_interface() -> gr.Blocks:
                             info="El modelo entrenado a usar (aparece al terminar/exportar + reiniciar).",
                         )
                         ds_video = gr.Video(label="🎬 Video donde montar la cara")
+                        # Con .dfm solo tienen sentido DOS presets: la identidad vive en el
+                        # modelo, así que el preset solo decide cómo se PEGA la cara. Máxima
+                        # Identidad (máscara BOX: respeta la geometría entrenada) para el
+                        # render final; Estándar (1 pasada, sin QC) para testear rápido. Los
+                        # demás recortan la geometría del modelo (máscara hull/parser) o
+                        # reinyectan rasgos del video (ojos/piel) — contraproducentes acá.
                         ds_mode = gr.Dropdown(
-                            choices=list(config.EXPRESSION_MODE_LABELS.items()),
+                            choices=[
+                                ("🎯 Máxima Identidad — para el MONTAJE FINAL",
+                                 config.EXPR_MAXIDENTITY),
+                                ("⚡ Estándar — para TESTEOS rápidos (menos calidad)",
+                                 config.EXPR_STANDARD),
+                            ],
                             value=config.EXPR_MAXIDENTITY,
                             label="Preset de calidad",
-                            info="Máscaras, enhancer, estabilidad temporal y QC del preset; la "
-                                 "identidad la pone el modelo. VRAM+RAM se exprimen siempre.",
+                            info="La identidad la pone el modelo entrenado; esto decide el "
+                                 "pegado. Final → Máxima Identidad. Probar encuadre/detección "
+                                 "→ Estándar (varias veces más rápido). VRAM+RAM al máximo "
+                                 "siempre.",
                         )
                         ds_chunk = gr.Dropdown(
                             choices=[("15 segundos (ver resultados muy seguido)", 15),

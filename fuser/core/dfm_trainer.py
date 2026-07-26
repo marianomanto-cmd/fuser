@@ -869,6 +869,62 @@ def _model_iter(model_dir: Path) -> int:
 RESUME_EXTRA_ITERS = int(os.environ.get("FUSER_DFM_RESUME_EXTRA", "100000"))
 
 
+def _optimizer_on_gpu(is_cuda: bool) -> bool:
+    """¿El optimizador de Adam vive en la GPU o en la RAM?
+
+    ``FUSER_DFM_OPT_GPU`` fuerza la ubicación (1=GPU, 0=RAM); sin la variable se
+    usa el default histórico por motor (RAM en DirectX12, GPU en CUDA).
+
+    Por qué existe: medido 2026-07-26 en la 4060 Ti con batch 8 — la GPU trabaja
+    solo ~31% del tiempo (52% totalmente parada) y el proceso principal quema
+    ~14 núcleos: el cuello es el optimizador corriendo en CPU cada iteración.
+    Con VRAM libre, subirlo a la GPU apunta a ~2× de velocidad. Si no entra, DFL
+    muere al construir el grafo (ANTES de entrenar, los pesos no se dañan): se
+    quita la variable del lanzador y se retoma como antes.
+    """
+    env = os.environ.get("FUSER_DFM_OPT_GPU", "").strip().lower()
+    if env in ("1", "true", "yes", "y"):
+        on_gpu = True
+    elif env in ("0", "false", "no", "n"):
+        on_gpu = False
+    else:
+        return is_cuda
+    if on_gpu != is_cuda:
+        log.info("Optimizador del entrenamiento en %s (FUSER_DFM_OPT_GPU=%s)",
+                 "GPU" if on_gpu else "RAM", env)
+    return on_gpu
+
+
+# Tramo FINAL del entrenamiento (iteraciones restantes) en el que se reactiva el
+# refinado lr_dropout. Antes de eso corre apagado: es una opción de pulido final
+# según el propio help de DFL, y en fase gruesa solo cuesta tiempo.
+FINE_PHASE_ITERS = 80_000
+
+
+def _phase_opts(is_cuda: bool, remaining: int) -> dict:
+    """Opciones de entrenamiento por FASE, decididas en cada start/resume.
+
+    Por qué existe (auditoría 2026-07-26): el modelo se siembra del preentrenado
+    RTT y HEREDA sus opciones del ``_data.dat`` — Fuser no fijaba gan_power /
+    true_face_power / lr_dropout en DirectX12, así que "default" no garantizaba
+    nada. Costos por iteración de lo heredable:
+      - gan_power>0: un 2º sess.run COMPLETO (discriminador) cada iter (~20-30%).
+      - true_face_power>0: otro sess.run extra (D_train).
+      - lr_dropout 'y': máscara aleatoria del tamaño de CADA matriz de pesos
+        (random_uniform + tf.where) re-muestreada cada iter (~3-10%).
+    Política: fase gruesa = todo apagado (lo que manda el help de DFL: GAN y
+    lr_dropout son refinado final); el lr_dropout se reactiva solo en las últimas
+    ``FINE_PHASE_ITERS`` del objetivo. En CUDA lr_dropout queda SIEMPRE 'n': su
+    tf.where es exactamente la op que revienta el allocator (OOM Select_22).
+    """
+    opts = {"gan_power": 0.0, "true_face_power": 0.0}
+    if is_cuda:
+        opts["lr_dropout"] = "n"
+    else:
+        opts["lr_dropout"] = "y" if remaining <= FINE_PHASE_ITERS else "n"
+    return opts
+
+
 def start(name: str, backend: Optional[str] = None) -> str:
     """Lanza (o retoma) el entrenamiento con el motor pedido (default: el activo).
 
@@ -889,6 +945,18 @@ def start(name: str, backend: Optional[str] = None) -> str:
         raise ValueError("Ese modelo no está preparado. Usá 🧬 CREAR MODELO DFM primero.")
     if is_running(slug):
         return "Ya está entrenando."
+    # UN entrenamiento a la vez: la GPU (8 GB) no aloja dos — el activo ocupa
+    # ~7,6 GB con el optimizador en GPU (y con el optimizador en RAM eran ~5,4:
+    # dos tampoco entraban). Sin esta guarda, el segundo muere construyendo el
+    # grafo con un "Resource exhausted" críptico de TensorFlow (visto 2026-07-26).
+    # Dos a la vez tampoco convendría: cada uno iría a <50% — mismos días totales.
+    otros = [n for n in running_trainings() if _slug(n) != slug]
+    if otros:
+        raise ValueError(
+            f"La GPU ya está entrenando a «{otros[0]}» y en esta placa solo entra "
+            f"UN entrenamiento a la vez. Pausalo primero (⏸️ en su pestaña) y "
+            f"después arrancá este. No perdés tiempo total: dos a la vez irían "
+            f"cada uno a menos de la mitad de velocidad.")
     # objetivo con LÍNEA BASE del contador del modelo (el iter de SAEHD persiste
     # en el .dat): primer arranque → base+objetivo; retomar tras 'done' → +extra.
     cur = _model_iter(model)
@@ -906,14 +974,9 @@ def start(name: str, backend: Optional[str] = None) -> str:
     # con cupo chico y revienta con "OOM shape[25088,512] ... device:CPU:0" en el
     # optimizador (medido). En CUDA va en la GPU.
     _is_cuda = _paths(backend)["backend"] == "cuda"
-    _opts = {"write_preview_history": True, "models_opt_on_gpu": _is_cuda}
-    if _is_cuda:
-        # lr_dropout genera una máscara aleatoria del TAMAÑO DE CADA MATRIZ DE
-        # PESOS con un tf.where (op Select). Es exactamente donde revienta CUDA:
-        # "OOM shape[25088,512] ... src_dst_opt_1/Select_22". DirectX12 lo aguanta;
-        # el allocator de CUDA no. Se apaga solo en CUDA (es una mejora de
-        # convergencia opcional, no algo imprescindible).
-        _opts["lr_dropout"] = "n"
+    _opt_gpu = _optimizer_on_gpu(_is_cuda)
+    _opts = {"write_preview_history": True, "models_opt_on_gpu": _opt_gpu}
+    _opts.update(_phase_opts(_is_cuda, remaining=max(0, target - cur)))
     _patch_model_options(model, **_opts)
     if _model_iter(model) <= 1:      # recién sembrado del RTT y aún sin entrenar
         _reset_preview_samples(model)

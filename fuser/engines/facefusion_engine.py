@@ -117,7 +117,15 @@ class FaceFusionSwapper(BaseFaceSwapper):
             return self._analyser
         from ..models.face_analyser import FaceAnalyser
 
-        self._analyser = FaceAnalyser(self.mm.analyser_providers(), self.mm.ctx_id(), self.mm.det_size)
+        # Suite RECORTADA: este analyser alimenta solo el post-procesado y la
+        # pasada 1 del modo 2 pasadas, que consumen kps/bbox/det_score (detection)
+        # y landmark_2d_106 (MAR de boca). ArcFace, landmark 3D y género/edad se
+        # tiraban a la basura en cada frame (3 inferencias por cara). El QC usa su
+        # PROPIA instancia completa (necesita embeddings) — no se toca. Este motor
+        # no implementa set_reference, así que nadie le pide embeddings.
+        self._analyser = FaceAnalyser(self.mm.analyser_providers(), self.mm.ctx_id(),
+                                      self.mm.det_size,
+                                      modules=["detection", "landmark_2d_106"])
         self._analyser.load()
         return self._analyser
 
@@ -209,6 +217,13 @@ class FaceFusionSwapper(BaseFaceSwapper):
             config.EXPR_MUSIC_VIDEO, config.EXPR_HIGH_EXPRESSION, config.EXPR_MAX)
         if not faces:
             return frame
+        # Con Deep Swapper el selector es 'one': FaceFusion solo swapea la cara
+        # MÁS GRANDE (face_selector_order='large-small'). El post-procesado tiene
+        # que limitarse a ESA cara: si no, en planos con más gente se afilaba la
+        # boca y se pasaba CodeFormer sobre caras de terceros que el swap no tocó.
+        if self._deep_swapper_active() and len(faces) > 1:
+            faces = [max(faces, key=lambda f: float(
+                (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])))]
 
         out = frame
         boost = self._mouth_open_boost()
@@ -500,8 +515,12 @@ class FaceFusionSwapper(BaseFaceSwapper):
         # reintenta la detección sobre el frame rotado y recupera caras que a 0° se
         # pierden (causa principal de "pierde la cara" en pitch extremo).
         self._set("face_detector_angles", list(s.ff_detector_angles) or [0])
-        # Umbral de detección permisivo: conserva cajas de baja confianza (mentón arriba).
-        self._set("face_detector_score", float(s.ff_detector_score) if music else 0.6)
+        # Umbral de detección: SIEMPRE el de los Settings. Antes solo se aplicaba
+        # en los modos "music" y el resto quedaba clavado en 0.6 — los presets
+        # 🎯 Máxima Identidad / 🎯➕ PRO declaraban 0.3 y se ignoraba (caras
+        # perdidas justo en mentón-arriba), y el re-swap de recuperación del QC
+        # pedía 0.25 y también corría a 0.6 (auditoría 2026-07-26).
+        self._set("face_detector_score", float(s.ff_detector_score))
         # Umbral de landmarks bajo: evita que FaceFusion DESCARTE la cara en
         # cabeza-atrás (cuando cae la confianza del landmarker) -> sin salto de máscara.
         self._set("face_landmarker_score", float(s.ff_landmarker_score))
@@ -721,12 +740,35 @@ class FaceFusionSwapper(BaseFaceSwapper):
         return bool(getattr(self.settings, "ff_deep_swapper_model", "") or "") \
             and self._modules.get("deep_swapper") is not None
 
+    def _face_store(self):
+        """El face_store de FaceFusion (caché de detecciones por hash de frame)."""
+        try:
+            from facefusion import face_store
+            return face_store
+        except Exception:  # pragma: no cover
+            return None
+
     def _ff_swap(self, frame: np.ndarray) -> np.ndarray:
         """Swap + enhancer nativos de FaceFusion sobre un frame completo.
 
         Con ``ff_deep_swapper_model`` usa el Deep Swapper (.dfm entrenado por
         identidad: NO usa la foto fuente); si no, el swapper one-shot normal.
+
+        Higiene del caché de FaceFusion (medido en la auditoría 2026-07-26):
+        cada módulo (swapper, enhancer) RE-DETECTA internamente con
+        ``get_many_faces`` y cachea por SHA1 de los bytes del frame. En video ese
+        caché (a) nunca acierta entre frames (bytes únicos) y crecía SIN LÍMITE
+        durante todo el montaje, y (b) tampoco acierta entre swapper y enhancer,
+        porque el swap cambió los píxeles → el enhancer pagaba una detección
+        completa EXTRA por frame (4 yoloface por los ángulos + landmarker +
+        ArcFace + clasificador). Fix: limpiar el caché al entrar (frame nuevo,
+        nada previo sirve) y SEMBRAR la detección que el swapper acaba de hacer
+        bajo el hash del frame YA swapeado — la geometría no cambió (paste_back
+        conserva la alineación), así el enhancer la reusa y no re-detecta.
         """
+        fs = self._face_store()
+        if fs is not None:
+            fs.clear_static_faces()
         if self._deep_swapper_active():
             out = self._run_module(self._modules["deep_swapper"],
                                    {"reference_faces": None, "target_vision_frame": frame})
@@ -740,6 +782,13 @@ class FaceFusionSwapper(BaseFaceSwapper):
         out = out if out is not None else frame
         enhancer = self._modules.get("enhancer")
         if enhancer is not None and self.settings.enhancer_model != "none":
+            if fs is not None and out is not frame:
+                try:
+                    detected = fs.get_static_faces(frame)   # lo que el swapper detectó
+                    if detected:
+                        fs.set_static_faces(out, detected)  # siembra para el enhancer
+                except Exception:  # pragma: no cover - el caché es solo optimización
+                    pass
             enh = self._run_module(enhancer, {"reference_faces": None, "target_vision_frame": out})
             if enh is not None:
                 out = enh

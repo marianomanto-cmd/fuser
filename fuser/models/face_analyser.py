@@ -21,10 +21,20 @@ log = get_logger(__name__)
 class FaceAnalyser:
     """Envoltorio de ``insightface.app.FaceAnalysis``."""
 
-    def __init__(self, providers: list, ctx_id: int, det_size: int = 640):
+    def __init__(self, providers: list, ctx_id: int, det_size: int = 640,
+                 modules: Optional[list] = None):
+        """``modules``: lista ``allowed_modules`` de InsightFace, o None = suite
+        completa. buffalo_l trae 5 modelos (SCRFD + 2 landmarkers + ArcFace +
+        género/edad) y los corre TODOS por cara; un caller que solo consume
+        kps/landmark_2d_106 (p.ej. el post-procesado del motor FaceFusion) puede
+        pedir ``["detection", "landmark_2d_106"]`` y ahorrarse 3 inferencias por
+        cara. OJO: sin "recognition" las caras NO traen ``normed_embedding``
+        (rompería average_embedding/QC) — recortar solo si se sabe qué se consume.
+        """
         self._providers = providers
         self._ctx_id = ctx_id
         self._det_size = det_size
+        self._modules = list(modules) if modules else None
         self._app = None
 
     def load(self) -> None:
@@ -32,12 +42,13 @@ class FaceAnalyser:
             return
         from insightface.app import FaceAnalysis  # import perezoso
 
-        log.info("Cargando detector buffalo_l (det_size=%d, ctx=%d)", self._det_size, self._ctx_id)
-        app = FaceAnalysis(
-            name="buffalo_l",
-            root=str(INSIGHTFACE_ROOT),
-            providers=self._providers,
-        )
+        log.info("Cargando detector buffalo_l (det_size=%d, ctx=%d, modulos=%s)",
+                 self._det_size, self._ctx_id, self._modules or "todos")
+        kwargs = {"name": "buffalo_l", "root": str(INSIGHTFACE_ROOT),
+                  "providers": self._providers}
+        if self._modules:
+            kwargs["allowed_modules"] = self._modules
+        app = FaceAnalysis(**kwargs)
         app.prepare(ctx_id=self._ctx_id, det_size=(self._det_size, self._det_size))
         self._app = app
 
