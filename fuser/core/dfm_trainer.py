@@ -468,12 +468,15 @@ def _run_dfl(args: List[str], log_file: Path, cwd: Optional[Path] = None,
     lf = open(log_file, "ab")
     kw = dict(cwd=str(cwd or main.parent), env=env, stdout=lf, stderr=subprocess.STDOUT)
     if detach:
-        # CREATE_NO_WINDOW (no DETACHED_PROCESS): con DETACHED el proceso queda SIN
-        # consola y cada uno de los ~25 workers de DFL se crea la suya -> 50
-        # ventanas cmd en pantalla. Con CREATE_NO_WINDOW tiene una consola propia
-        # OCULTA que los hijos heredan: nada visible. Sigue sobreviviendo al cierre
-        # de la app (la vida del proceso no depende de la consola; verificado).
-        kw["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | NEW_PROCESS_GROUP
+        # DETACHED_PROCESS | NEW_PROCESS_GROUP.
+        # ⚠️ NO cambiar a CREATE_NO_WINDOW para ocultar las ventanas de los ~25
+        # workers: se probó y CUELGA el entrenamiento justo tras "Sort by yaw"
+        # (medido: 0,1 s de CPU en 20 s, sin una sola iteración, tanto en DX12
+        # como en CUDA). Los workers de DFL son procesos de consola y necesitan
+        # la consola propia que les da DETACHED. Las ventanas son molestas pero
+        # el entrenamiento funciona; si se quiere ocultarlas, hacerlo DESPUÉS del
+        # arranque con ShowWindow, nunca cambiando estos flags.
+        kw["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | NEW_PROCESS_GROUP
         kw["stdin"] = subprocess.DEVNULL if stdin_text is None else subprocess.PIPE
         proc = subprocess.Popen(cmd, **kw)
         if stdin_text is not None:
