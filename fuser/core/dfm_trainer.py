@@ -916,8 +916,18 @@ def _phase_opts(is_cuda: bool, remaining: int) -> dict:
     lr_dropout son refinado final); el lr_dropout se reactiva solo en las últimas
     ``FINE_PHASE_ITERS`` del objetivo. En CUDA lr_dropout queda SIEMPRE 'n': su
     tf.where es exactamente la op que revienta el allocator (OOM Select_22).
+
+    ``eyes_mouth_prio`` va SIEMPRE encendido (2026-07-26). Añade dos términos L1
+    ×300 sobre las máscaras de ojos y boca, o sea obliga al modelo a priorizar
+    esas dos regiones en vez de repartir el error por toda la cara. El propio
+    help de DFL dice que arregla los "alien eyes" y la dirección de mirada
+    equivocada, y que mejora el detalle de los dientes — exactamente el síntoma
+    reportado ("los ojos apuntan al vacío"). Los ojos son diminutos a 224 px:
+    sin esta prioridad pesan casi nada en el error y el decoder dibuja un ojo
+    promedio. Cuesta dos reduce_mean por iteración (~1-3%): barato para lo que
+    arregla. Viene apagado por defecto y se heredaba así del preentrenado RTT.
     """
-    opts = {"gan_power": 0.0, "true_face_power": 0.0}
+    opts = {"gan_power": 0.0, "true_face_power": 0.0, "eyes_mouth_prio": True}
     if is_cuda:
         opts["lr_dropout"] = "n"
     else:
