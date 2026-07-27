@@ -635,6 +635,22 @@ class FaceFusionSwapper(BaseFaceSwapper):
                 self._set("face_mask_types", ["box", "occlusion"])
             self._set("face_mask_padding", (0, 0, 0, 0))
             self._set("face_mask_blur", float(np.clip(s.mask_blur, 0.0, 1.0)))
+        # AJUSTE DEL BORDE con Deep Swapper (.dfm): pisa lo anterior. Con el .dfm
+        # la identidad ya está horneada, así que la máscara solo decide DÓNDE se
+        # pega — y sin parser nada recorta el swap al contorno real de la cara:
+        # se desborda al cuello, al pelo y por debajo del mentón. El parser aquí
+        # segmenta la cara YA SWAPEADA (deep_swapper.py: create_region_mask corre
+        # sobre crop_vision_frame post-forward), o sea recorta a donde de verdad
+        # hay cara, sin arrastrar la silueta del objetivo como pasaba en one-shot.
+        if self._deep_swapper_active():
+            fit = getattr(s, "ff_edge_fit", config.EDGE_SUELTO)
+            cfg = config.EDGE_FIT_PRESETS.get(fit)
+            if cfg:
+                self._set("face_mask_types", list(cfg["types"]))
+                self._set("face_mask_padding", tuple(cfg["pad"]))
+                self._set("face_mask_blur",
+                          float(np.clip(max(s.mask_blur, cfg["blur"]), 0.0, 1.0)))
+
         # Regiones faciales a INCLUIR. Mantenemos boca/labios (clave para el canto:
         # dientes y boca abierta). El recorte fino del contorno lo hacen el parser
         # (region) + occluder + el padding inferior, no la exclusión de la boca.

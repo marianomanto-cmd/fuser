@@ -51,8 +51,17 @@ PARTES = [
     ("Video entero (sin partes)", 0),
 ]
 
+# Preset propio del Montador (no vive en EXPRESSION_PRESETS): igual que Máxima
+# Identidad pero con GFPGAN en vez de CodeFormer. CodeFormer RESTAURA desde su
+# codebook —de ahí la nitidez y también el look "retocado"—; GFPGAN es más
+# conservador y suele leerse más natural, a costa de menos detalle en dientes.
+# Con un .dfm la identidad ya está horneada, así que el enhancer solo decide el
+# acabado: vale la pena tenerlo como A/B.
+PRESET_GFPGAN = "max_identity_gfpgan"
+
 PRESETS = [
     ("🎯 Máxima Identidad — para el MONTAJE FINAL", config.EXPR_MAXIDENTITY),
+    ("🌿 Máxima Identidad + GFPGAN — acabado más natural, menos 'retocado'", PRESET_GFPGAN),
     ("⚡ Estándar — para TESTEOS rápidos (menos calidad)", config.EXPR_STANDARD),
 ]
 
@@ -61,7 +70,8 @@ PRESETS = [
 # Ajustes del montaje
 # ---------------------------------------------------------------------------
 def _settings(dfm_id: str, preset: str, piel: float = 0.0,
-              enhancer: Optional[float] = None) -> config.Settings:
+              enhancer: Optional[float] = None,
+              borde: str = config.EDGE_SUELTO) -> config.Settings:
     """Settings del montaje con .dfm: preset de pegado + VRAM/RAM al máximo.
 
     La IDENTIDAD vive en el modelo entrenado; el preset solo decide cómo se
@@ -76,17 +86,34 @@ def _settings(dfm_id: str, preset: str, piel: float = 0.0,
     ``enhancer`` (0..1) pisa ``enhancer_blend``: cuánto se mezcla la
     restauración de CodeFormer. Bajarlo deja pasar más del modelo crudo (menos
     "retocado", pero más suave si el modelo está poco entrenado).
+
+    ``borde`` = ``ff_edge_fit``: cuánto se recorta el swap al contorno real de
+    la cara. El preset de Máxima Identidad quita el parser a propósito (para que
+    pase la geometría del modelo) y el precio es que NADA acota el pegado: se
+    desborda al cuello, al pelo y bajo el mentón. Subirlo devuelve ese recorte.
     """
     s = config.Settings()
-    base = config.EXPRESSION_PRESETS.get(preset, config.EXPRESSION_PRESETS[config.EXPR_MAXIDENTITY])
+    # El preset GFPGAN deriva de Máxima Identidad: mismo modelo, misma máscara,
+    # misma geometría — solo cambia el enhancer.
+    es_gfpgan = preset == PRESET_GFPGAN
+    clave = config.EXPR_MAXIDENTITY if es_gfpgan else preset
+    base = config.EXPRESSION_PRESETS.get(clave, config.EXPRESSION_PRESETS[config.EXPR_MAXIDENTITY])
     for k, v in base.items():
         setattr(s, k, v)
-    s.expression_mode = preset
+    # expression_mode tiene que ser un modo REAL: el motor lo consulta para
+    # decidir umbrales y flujo. Un valor inventado lo mandaría a los defaults.
+    s.expression_mode = clave
+    if es_gfpgan:
+        s.enhancer_model = "gfpgan_1.4"
+        # GFPGAN no tiene el "weight" de CodeFormer (no restaura desde codebook),
+        # así que la fidelidad se controla solo con la mezcla.
+        s.enhancer_blend = 0.8
     s.ff_deep_swapper_model = dfm_id
     s.chain_shape_then_texture = False   # el .dfm ya es forma+textura
     s.skin_detail = float(max(0.0, min(1.0, piel or 0.0)))
     if enhancer is not None:
         s.enhancer_blend = float(max(0.0, min(1.0, enhancer)))
+    s.ff_edge_fit = borde if borde in config.EDGE_FIT_PRESETS else config.EDGE_SUELTO
     # El blending de perfiles mezcla mandíbula/oreja de vuelta hacia el VIDEO:
     # con un .dfm eso deshace la geometría entrenada. La máscara box ya funde.
     s.profile_blending_strength = 0.0
@@ -223,6 +250,19 @@ def _limpiar_parciales(stem: str) -> None:
 # ---------------------------------------------------------------------------
 # El montaje (1 video o cola: mismo bucle plano)
 # ---------------------------------------------------------------------------
+def _tag_ajustes(preset: str, piel: float, enhancer: Optional[float], borde: str) -> str:
+    """Firma legible de los ajustes que CAMBIAN la imagen de salida.
+
+    Nombra la carpeta de partes renderizadas: dos configuraciones distintas
+    nunca comparten partes, así la reanudación no mezcla un video con tramos
+    hechos con otros ajustes.
+    """
+    tag = f"{preset}_{borde}_p{int(round((piel or 0.0) * 100)):03d}"
+    if enhancer is not None:
+        tag += f"_e{int(round(enhancer * 100)):03d}"
+    return tag
+
+
 def _norm_files(files) -> List[str]:
     out = []
     for f in (files or []):
@@ -234,7 +274,8 @@ def _norm_files(files) -> List[str]:
     return list(dict.fromkeys(out))
 
 
-def montar(dfm_id, files, preset, secs, piel=0.0, enhancer=None, progress=gr.Progress()):
+def montar(dfm_id, files, preset, secs, piel=0.0, enhancer=None,
+           borde=config.EDGE_SUELTO, progress=gr.Progress()):
     """Monta el modelo .dfm en 1..N videos, por partes y con vista en vivo.
 
     Generator de Gradio: emite ``(última parte, archivos, estado)``. Los videos
@@ -254,7 +295,7 @@ def montar(dfm_id, files, preset, secs, piel=0.0, enhancer=None, progress=gr.Pro
     nv = len(videos)
 
     progress(0.01, desc="Cargando el modelo entrenado…")
-    pipeline = get_pipeline(_settings(dfm_id, preset, piel, enhancer),
+    pipeline = get_pipeline(_settings(dfm_id, preset, piel, enhancer, borde),
                             progress=lambda f, m="": progress(0.01 + f * 0.05, desc=m))
 
     listos: List[str] = []       # finales terminados (cola)
@@ -295,11 +336,12 @@ def montar(dfm_id, files, preset, secs, piel=0.0, enhancer=None, progress=gr.Pro
                 yield None, list(entregas), f"❌ {etiqueta} descartado ({exc}). Sigo…"
             continue
 
-        # Partes renderizadas SEPARADAS POR PRESET (hallazgo de la revisión: sin
-        # esto, partes de un test Estándar se "reanudaban" dentro de un montaje
-        # final Máxima Identidad y el video salía mezclado). El corte de entrada
-        # sí se comparte entre presets: no depende de ellos.
-        listas_dir = _job_dir(dfm_id, video, secs) / f"listas_{preset}"
+        # Partes renderizadas SEPARADAS POR TODOS los ajustes que cambian la
+        # imagen (hallazgo de la revisión, extendido): sin esto, partes de un
+        # test se "reanudaban" dentro de un montaje con otros ajustes y el video
+        # final salía mezclado. El corte de ENTRADA sí se comparte: no depende
+        # de ninguno de estos.
+        listas_dir = _job_dir(dfm_id, video, secs) / f"listas_{_tag_ajustes(preset, piel, enhancer, borde)}"
         listas_dir.mkdir(parents=True, exist_ok=True)
         n = len(partes_in)
         hechas: List[str] = []
@@ -421,7 +463,7 @@ def montar(dfm_id, files, preset, secs, piel=0.0, enhancer=None, progress=gr.Pro
 
 
 def previsualizar(dfm_id, files, preset, n_frames, piel=0.0, enhancer=None,
-                  progress=gr.Progress()):
+                  borde=config.EDGE_SUELTO, progress=gr.Progress()):
     """👁️ Muestra N frames sueltos ya montados, ANTES de lanzar el montaje entero.
 
     Toma frames repartidos a lo largo del video (keyframes equiespaciados, así
@@ -445,7 +487,7 @@ def previsualizar(dfm_id, files, preset, n_frames, piel=0.0, enhancer=None,
     n = int(n_frames or 10)
     try:
         progress(0.02, desc="Cargando el modelo entrenado…")
-        pipeline = get_pipeline(_settings(dfm_id, preset, piel, enhancer),
+        pipeline = get_pipeline(_settings(dfm_id, preset, piel, enhancer, borde),
                                 progress=lambda f, m="": progress(0.02 + f * 0.35, desc=m))
         frames = pipeline.preview(
             video, n_frames=n,
@@ -509,6 +551,13 @@ def build_tab() -> dict:
                 label="🎬 Video(s) donde montar — 1 solo o una cola",
                 file_count="multiple", file_types=["video"], type="filepath",
             )
+            borde_dd = gr.Dropdown(
+                choices=list(config.EDGE_FIT_LABELS.items()),
+                value=config.EDGE_SUELTO, label="✂️ Ajuste del borde de la cara",
+                info="Si el swap se DESBORDA (cuello, pelo, más allá del mentón), subilo. "
+                     "El preset de Máxima Identidad quita el recorte a propósito para que "
+                     "pase la geometría del modelo — y ese es justo el precio.",
+            )
             with gr.Accordion("🎚️ Ajuste fino del realismo (contra el look plástico)",
                               open=False):
                 piel_sl = gr.Slider(
@@ -552,11 +601,13 @@ def build_tab() -> dict:
     # mata el proceso; además, el clear_stop de una acción nueva anulaba el
     # Detener de la que estaba corriendo. (Hallazgo de la revisión adversarial.)
     preview_btn.click(previsualizar,
-                      inputs=[dfm_dd, videos_in, preset_dd, n_frames, piel_sl, enh_sl],
+                      inputs=[dfm_dd, videos_in, preset_dd, n_frames, piel_sl, enh_sl,
+                              borde_dd],
                       outputs=[galeria, estado],
                       concurrency_id="gpu", concurrency_limit=1)
     montar_btn.click(montar,
-                     inputs=[dfm_dd, videos_in, preset_dd, partes_dd, piel_sl, enh_sl],
+                     inputs=[dfm_dd, videos_in, preset_dd, partes_dd, piel_sl, enh_sl,
+                             borde_dd],
                      outputs=[preview, archivos, estado],
                      concurrency_id="gpu", concurrency_limit=1)
     # En su propio evento SIN cola: tiene que llegar mientras el montaje corre.

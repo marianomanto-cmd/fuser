@@ -299,6 +299,24 @@ EXPR_STANDARD = "standard"
 EXPR_MUSIC_VIDEO = "music_video"
 EXPR_HIGH_EXPRESSION = "high_expression"
 EXPR_MAX = "max"
+# Ajuste del borde de la cara en el montaje con .dfm (ver Settings.ff_edge_fit).
+EDGE_SUELTO = "suelto"
+EDGE_AJUSTADO = "ajustado"
+EDGE_MUY_AJUSTADO = "muy_ajustado"
+EDGE_FIT_LABELS = {
+    EDGE_SUELTO: "Suelto — máxima geometría del modelo (como venía)",
+    EDGE_AJUSTADO: "Ajustado — recorta al contorno de la cara (recomendado si se desborda)",
+    EDGE_MUY_AJUSTADO: "Muy ajustado — recorte fuerte de mentón y cuello",
+}
+# Máscaras / padding / blur mínimo por nivel. El padding es (arriba, derecha,
+# abajo, izquierda) en %: retrae la CAJA hacia adentro. El de abajo es el que
+# saca el swap del mentón y el cuello, que es por donde más se desborda.
+EDGE_FIT_PRESETS = {
+    EDGE_SUELTO:       {"types": ["box", "occlusion"],           "pad": (0, 2, 0, 2),  "blur": 0.30},
+    EDGE_AJUSTADO:     {"types": ["box", "occlusion", "region"], "pad": (0, 4, 8, 4),  "blur": 0.35},
+    EDGE_MUY_AJUSTADO: {"types": ["box", "occlusion", "region"], "pad": (2, 9, 18, 9), "blur": 0.42},
+}
+
 EXPR_MAXIDENTITY = "max_identity"
 EXPR_MAXID_CHAIN = "max_identity_chain"
 
@@ -633,6 +651,13 @@ class Settings:
     # OBJETIVO y recorta la nariz/mandíbula/cráneo NUEVOS de la fuente). True = solo
     # box + occlusion, sin retracción -> deja pasar la geometría de la foto.
     ff_geometry_mask: bool = False
+    # AJUSTE DEL BORDE en el montaje con .dfm. La contracara de ff_geometry_mask:
+    # sin máscara de región nada recorta el swap al contorno REAL de la cara, y
+    # se desborda al cuello/pelo/mentón (reportado 2026-07-27). "suelto" = como
+    # venía (solo box+occlusion, máxima geometría del modelo); "ajustado" y
+    # "muy_ajustado" suman el parser bisenet —que segmenta la cara YA SWAPEADA,
+    # o sea recorta a donde de verdad hay cara— y retraen la caja.
+    ff_edge_fit: str = EDGE_SUELTO
     # Armonización fotométrica post-swap (LAB, ver core/postfx.py): iguala el
     # tono/iluminación de la cara pegada al frame original. Anti "cara pegada".
     color_harmonize: bool = False
