@@ -45,6 +45,33 @@ def get_pipeline(settings: config.Settings, progress=None) -> SwapPipeline:
     return pipeline
 
 
+def release_pipeline() -> None:
+    """Descarga los modelos cacheados y LIBERA su VRAM. Deja la caché vacía.
+
+    Crítico antes de arrancar/retomar un entrenamiento: medido 2026-07-27, con
+    la app ociosa pero con los modelos del montaje cargados (3,3 GB dedicados),
+    el entrenamiento solo consiguió 3,5 GB de los 7,6 que necesita y DirectML
+    DERRAMÓ 4,7 GB a memoria compartida (RAM por PCIe) — sin error ni aviso, con
+    la GPU marcando 100%: 594 ms/iter → 3.454 ms/iter (5,8× más lento). El
+    unload también limpia los inference-pools de FaceFusion (que viven a nivel
+    de módulo y sobreviven a la instancia del engine).
+    """
+    pipe = PIPELINE_CACHE.get("pipeline")
+    if pipe is not None and getattr(pipe, "engine", None) is not None:
+        try:
+            pipe.engine.unload()
+        except Exception as exc:  # pragma: no cover
+            log.warning("No pude descargar el pipeline: %s", exc)
+    PIPELINE_CACHE["pipeline"] = None
+    PIPELINE_CACHE["signature"] = None
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:  # pragma: no cover
+        pass
+
+
 # Valor "sin modelo entrenado" de los desplegables de modelos .dfm.
 NO_DFM = "— sin modelo (one-shot con fotos) —"
 

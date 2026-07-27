@@ -38,33 +38,10 @@ from .shared import (PIPELINE_CACHE as _PIPELINE_CACHE, NO_DFM,
                      bg_status_md as _bg_status_md,
                      dfm_choices as _dfm_choices,
                      ensure_gpu_libre as _ensure_gpu_libre,
-                     get_pipeline as _get_pipeline)
+                     get_pipeline as _get_pipeline,
+                     release_pipeline as _shared_release)
 
 log = get_logger(__name__)
-
-def free_swap_vram() -> None:
-    """Descarga el pipeline de swap cacheado y libera su VRAM.
-
-    Clave para Imagen→Vídeo en 8 GB: el swap y ComfyUI comparten los 8 GB. Si el
-    swap tiene modelos cargados en la GPU cuando ComfyUI genera vídeo, la VRAM se
-    satura y la generación va ~50× más lenta (thrashing). La pestaña i2v llama a
-    esto antes de generar, así el usuario no tiene que cerrar nada a mano.
-    """
-    pipe = _PIPELINE_CACHE.get("pipeline")
-    if pipe is not None:
-        try:
-            if getattr(pipe, "engine", None) is not None:
-                pipe.engine.unload()
-        except Exception as exc:  # pragma: no cover
-            log.warning("No pude descargar el pipeline de swap: %s", exc)
-    _PIPELINE_CACHE["pipeline"] = None
-    _PIPELINE_CACHE["signature"] = None
-    try:
-        import gc
-
-        gc.collect()
-    except Exception:
-        pass
 
 # Intentos por video en la cola: si falla, se manda al FINAL y se reintenta luego;
 # tras este nº de intentos se descarta (evita un bucle infinito con un video imposible).
@@ -259,6 +236,9 @@ def _on_trainer_resume(cara):
     from ..core import dfm_trainer
     if not cara:
         return "⚠️ Elegí el modelo."
+    # La VRAM que retiene el montaje ESTRANGULA al entrenamiento (ver
+    # release_pipeline): sin esto, entrenar después de montar corre ~6× lento.
+    _release_pipeline()
     try:
         return dfm_trainer.start(cara)
     except Exception as exc:
@@ -380,6 +360,7 @@ def _on_create_dfm(name, files, person_videos, dst_videos, progress=gr.Progress(
     msg_prep = dfm_trainer.prepare(name, curated, videos,
                                    progress=lambda f, m="": progress(0.30 + f * 0.62, desc=m))
     progress(0.94, desc="Lanzando el entrenamiento…")
+    _release_pipeline()   # la VRAM del montaje estrangula al entrenamiento (~6× lento)
     msg_train = dfm_trainer.start(name, backend=backend)
     faces = face_library.list_faces()
     status_md = (
@@ -724,20 +705,13 @@ def _on_compare(source_files, face_choice, video_path, models, n_cmp, *control_v
 
 
 def _release_pipeline() -> None:
-    """Descarga los modelos del pipeline cacheado y limpia el pool de FaceFusion.
+    """Descarga los modelos cacheados y libera su VRAM (ver ui/shared.py).
 
-    Imprescindible entre pasadas de la cadena: sin el clear del inference-pool de
-    FF (que hace ``engine.unload``), la 2ª pasada reusaría el pool del modelo de la
-    1ª (bug del pool obsoleto). También libera VRAM antes de cargar el 2º modelo.
+    Imprescindible entre pasadas de la cadena forma+textura (sin el clear del
+    inference-pool de FF, la 2ª pasada reusaría el pool de la 1ª) y ANTES de
+    lanzar un entrenamiento (si no, DirectML derrama y entrena ~6× más lento).
     """
-    p = _PIPELINE_CACHE.get("pipeline")
-    if p is not None and getattr(p, "engine", None) is not None:
-        try:
-            p.engine.unload()
-        except Exception:  # pragma: no cover
-            pass
-    _PIPELINE_CACHE["pipeline"] = None
-    _PIPELINE_CACHE["signature"] = None
+    _shared_release()
 
 
 def _swap_video_once(settings, source_files, face_choice, video_path, progress, lo, hi, tag):
