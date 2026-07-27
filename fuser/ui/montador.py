@@ -60,11 +60,22 @@ PRESETS = [
 # ---------------------------------------------------------------------------
 # Ajustes del montaje
 # ---------------------------------------------------------------------------
-def _settings(dfm_id: str, preset: str) -> config.Settings:
+def _settings(dfm_id: str, preset: str, piel: float = 0.0,
+              enhancer: Optional[float] = None) -> config.Settings:
     """Settings del montaje con .dfm: preset de pegado + VRAM/RAM al máximo.
 
     La IDENTIDAD vive en el modelo entrenado; el preset solo decide cómo se
     PEGA la cara (máscara, enhancer, estabilidad, QC).
+
+    ``piel`` (0..1) = ``skin_detail``: reinyecta la ALTA FRECUENCIA del frame
+    original (poros, grano) dentro de la cara. Es el anti-plástico de la app.
+    No arrastra identidad —la identidad vive en la forma, que es baja y media
+    frecuencia— así que subirlo no tira el parecido hacia la cara del video;
+    solo devuelve textura de piel real bajo esa luz. Default 0 = como antes.
+
+    ``enhancer`` (0..1) pisa ``enhancer_blend``: cuánto se mezcla la
+    restauración de CodeFormer. Bajarlo deja pasar más del modelo crudo (menos
+    "retocado", pero más suave si el modelo está poco entrenado).
     """
     s = config.Settings()
     base = config.EXPRESSION_PRESETS.get(preset, config.EXPRESSION_PRESETS[config.EXPR_MAXIDENTITY])
@@ -73,7 +84,9 @@ def _settings(dfm_id: str, preset: str) -> config.Settings:
     s.expression_mode = preset
     s.ff_deep_swapper_model = dfm_id
     s.chain_shape_then_texture = False   # el .dfm ya es forma+textura
-    s.skin_detail = 0.0                  # no reinyectar textura del video
+    s.skin_detail = float(max(0.0, min(1.0, piel or 0.0)))
+    if enhancer is not None:
+        s.enhancer_blend = float(max(0.0, min(1.0, enhancer)))
     # El blending de perfiles mezcla mandíbula/oreja de vuelta hacia el VIDEO:
     # con un .dfm eso deshace la geometría entrenada. La máscara box ya funde.
     s.profile_blending_strength = 0.0
@@ -221,7 +234,7 @@ def _norm_files(files) -> List[str]:
     return list(dict.fromkeys(out))
 
 
-def montar(dfm_id, files, preset, secs, progress=gr.Progress()):
+def montar(dfm_id, files, preset, secs, piel=0.0, enhancer=None, progress=gr.Progress()):
     """Monta el modelo .dfm en 1..N videos, por partes y con vista en vivo.
 
     Generator de Gradio: emite ``(última parte, archivos, estado)``. Los videos
@@ -241,7 +254,7 @@ def montar(dfm_id, files, preset, secs, progress=gr.Progress()):
     nv = len(videos)
 
     progress(0.01, desc="Cargando el modelo entrenado…")
-    pipeline = get_pipeline(_settings(dfm_id, preset),
+    pipeline = get_pipeline(_settings(dfm_id, preset, piel, enhancer),
                             progress=lambda f, m="": progress(0.01 + f * 0.05, desc=m))
 
     listos: List[str] = []       # finales terminados (cola)
@@ -407,7 +420,8 @@ def montar(dfm_id, files, preset, secs, progress=gr.Progress()):
             f"✅ **Montaje completo: {len(listos)}/{nv} video(s)** en `outputs/`{cola}.")
 
 
-def previsualizar(dfm_id, files, preset, n_frames, progress=gr.Progress()):
+def previsualizar(dfm_id, files, preset, n_frames, piel=0.0, enhancer=None,
+                  progress=gr.Progress()):
     """👁️ Muestra N frames sueltos ya montados, ANTES de lanzar el montaje entero.
 
     Toma frames repartidos a lo largo del video (keyframes equiespaciados, así
@@ -431,7 +445,7 @@ def previsualizar(dfm_id, files, preset, n_frames, progress=gr.Progress()):
     n = int(n_frames or 10)
     try:
         progress(0.02, desc="Cargando el modelo entrenado…")
-        pipeline = get_pipeline(_settings(dfm_id, preset),
+        pipeline = get_pipeline(_settings(dfm_id, preset, piel, enhancer),
                                 progress=lambda f, m="": progress(0.02 + f * 0.35, desc=m))
         frames = pipeline.preview(
             video, n_frames=n,
@@ -444,8 +458,11 @@ def previsualizar(dfm_id, files, preset, n_frames, progress=gr.Progress()):
 
     nombre = Path(video).name
     extra = f" · los otros {len(videos) - 1} video(s) de la cola no se tocan" if len(videos) > 1 else ""
+    ajustes = f"textura de piel **{piel:.2f}**"
+    if enhancer is not None:
+        ajustes += f" · enhancer **{enhancer:.2f}**"
     return frames, (
-        f"✅ **{len(frames)} frames** de **{nombre}**{extra}.\n\n"
+        f"✅ **{len(frames)} frames** de **{nombre}**{extra} · {ajustes}.\n\n"
         f"Mirá identidad, bordes de la máscara y color. *Es 1 pasada sin "
         f"estabilización temporal ni QC: el montaje final sale algo más estable.* "
         f"Si convence, dale a 🎬 MONTAR.")
@@ -492,6 +509,21 @@ def build_tab() -> dict:
                 label="🎬 Video(s) donde montar — 1 solo o una cola",
                 file_count="multiple", file_types=["video"], type="filepath",
             )
+            with gr.Accordion("🎚️ Ajuste fino del realismo (contra el look plástico)",
+                              open=False):
+                piel_sl = gr.Slider(
+                    0.0, 1.0, value=0.0, step=0.05, label="Textura de piel del video",
+                    info="Reinyecta el GRANO y los POROS del frame original dentro de la "
+                         "cara. No arrastra identidad (eso vive en la forma, no en la "
+                         "micro-textura): devuelve piel real bajo esa luz. Contra la cara "
+                         "de cera, probá 0,3–0,5. En 0 queda como antes.",
+                )
+                enh_sl = gr.Slider(
+                    0.0, 1.0, value=0.7, step=0.05, label="Fuerza del enhancer (CodeFormer)",
+                    info="Cuánto se mezcla la restauración. Alto = más nítido pero más "
+                         "'retocado'; bajo = más crudo del modelo, más natural pero más "
+                         "suave si está poco entrenado. 0,7 es el valor del preset.",
+                )
             with gr.Group():
                 gr.Markdown("#### 👁️ Probar antes de montar")
                 n_frames = gr.Slider(
@@ -519,10 +551,12 @@ def build_tab() -> dict:
     # (montar + una preview) cargan DOS juegos de modelos en los 8 GB y DirectML
     # mata el proceso; además, el clear_stop de una acción nueva anulaba el
     # Detener de la que estaba corriendo. (Hallazgo de la revisión adversarial.)
-    preview_btn.click(previsualizar, inputs=[dfm_dd, videos_in, preset_dd, n_frames],
+    preview_btn.click(previsualizar,
+                      inputs=[dfm_dd, videos_in, preset_dd, n_frames, piel_sl, enh_sl],
                       outputs=[galeria, estado],
                       concurrency_id="gpu", concurrency_limit=1)
-    montar_btn.click(montar, inputs=[dfm_dd, videos_in, preset_dd, partes_dd],
+    montar_btn.click(montar,
+                     inputs=[dfm_dd, videos_in, preset_dd, partes_dd, piel_sl, enh_sl],
                      outputs=[preview, archivos, estado],
                      concurrency_id="gpu", concurrency_limit=1)
     # En su propio evento SIN cola: tiene que llegar mientras el montaje corre.
