@@ -407,6 +407,50 @@ def montar(dfm_id, files, preset, secs, progress=gr.Progress()):
             f"✅ **Montaje completo: {len(listos)}/{nv} video(s)** en `outputs/`{cola}.")
 
 
+def previsualizar(dfm_id, files, preset, n_frames, progress=gr.Progress()):
+    """👁️ Muestra N frames sueltos ya montados, ANTES de lanzar el montaje entero.
+
+    Toma frames repartidos a lo largo del video (keyframes equiespaciados, así
+    caen poses distintas) y los procesa con LOS MISMOS ajustes del montaje. Con
+    un video de 4 min a máxima calidad, esto son ~1 min contra varias horas:
+    sirve para ver la identidad, la máscara y el color antes de comprometerse.
+
+    Aproximación honesta: la preview corre en 1 pasada, sin la estabilización
+    temporal ni el QC del montaje real (que necesitan la secuencia completa).
+    Lo que ves por frame es representativo; la estabilidad entre frames, no.
+    """
+    if not dfm_id or dfm_id == NO_DFM:
+        raise gr.Error("Elegí un modelo .dfm (se crean en la pestaña 🧬 Deep Swap).")
+    videos = _norm_files(files)
+    if not videos:
+        raise gr.Error("Subí el video que querés previsualizar.")
+    ensure_gpu_libre("la previsualización")
+    pipeline_core.clear_stop()
+
+    video = videos[0]        # siempre el PRIMERO de la lista: predecible
+    n = int(n_frames or 10)
+    try:
+        progress(0.02, desc="Cargando el modelo entrenado…")
+        pipeline = get_pipeline(_settings(dfm_id, preset),
+                                progress=lambda f, m="": progress(0.02 + f * 0.35, desc=m))
+        frames = pipeline.preview(
+            video, n_frames=n,
+            progress=lambda f, m="": progress(0.37 + f * 0.63, desc=m))
+    except gr.Error:
+        raise
+    except Exception as exc:  # pragma: no cover
+        log.exception("Montador: falló la previsualización")
+        raise gr.Error(f"Error al previsualizar: {exc}")
+
+    nombre = Path(video).name
+    extra = f" · los otros {len(videos) - 1} video(s) de la cola no se tocan" if len(videos) > 1 else ""
+    return frames, (
+        f"✅ **{len(frames)} frames** de **{nombre}**{extra}.\n\n"
+        f"Mirá identidad, bordes de la máscara y color. *Es 1 pasada sin "
+        f"estabilización temporal ni QC: el montaje final sale algo más estable.* "
+        f"Si convence, dale a 🎬 MONTAR.")
+
+
 def detener():
     """Pide la parada cooperativa: el frame en curso termina, lo hecho se guarda."""
     pipeline_core.request_stop()
@@ -448,6 +492,14 @@ def build_tab() -> dict:
                 label="🎬 Video(s) donde montar — 1 solo o una cola",
                 file_count="multiple", file_types=["video"], type="filepath",
             )
+            with gr.Group():
+                gr.Markdown("#### 👁️ Probar antes de montar")
+                n_frames = gr.Slider(
+                    4, 16, value=10, step=1, label="Frames de muestra",
+                    info="Se toman repartidos a lo largo del video (poses distintas) "
+                         "y se procesan con los MISMOS ajustes del montaje.",
+                )
+                preview_btn = gr.Button("👁️ Previsualizar frames", variant="secondary")
             montar_btn = gr.Button("🎬 MONTAR", variant="primary")
             detener_btn = gr.Button("⏹️ Detener y guardar lo hecho", variant="stop")
             gr.Markdown(
@@ -456,7 +508,9 @@ def build_tab() -> dict:
                 elem_classes="fuser-soft",
             )
         with gr.Column():
-            preview = gr.Video(label="👁️ Última parte terminada (mirá la calidad acá)")
+            galeria = gr.Gallery(label="👁️ Frames de muestra (antes de montar)",
+                                 columns=3, object_fit="contain", height=380)
+            preview = gr.Video(label="🎬 Última parte terminada (mirá la calidad acá)")
             archivos = gr.Files(label="⬇️ Partes y videos completos (descargar)")
             estado = gr.Markdown("", elem_classes="fuser-soft")
 
@@ -465,6 +519,9 @@ def build_tab() -> dict:
     # (montar + una preview) cargan DOS juegos de modelos en los 8 GB y DirectML
     # mata el proceso; además, el clear_stop de una acción nueva anulaba el
     # Detener de la que estaba corriendo. (Hallazgo de la revisión adversarial.)
+    preview_btn.click(previsualizar, inputs=[dfm_dd, videos_in, preset_dd, n_frames],
+                      outputs=[galeria, estado],
+                      concurrency_id="gpu", concurrency_limit=1)
     montar_btn.click(montar, inputs=[dfm_dd, videos_in, preset_dd, partes_dd],
                      outputs=[preview, archivos, estado],
                      concurrency_id="gpu", concurrency_limit=1)
