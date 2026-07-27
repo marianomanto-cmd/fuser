@@ -499,6 +499,20 @@ def _run_dfl(args: List[str], log_file: Path, cwd: Optional[Path] = None,
     return proc
 
 
+def _read_model_options(model_dir: Path) -> dict:
+    """Opciones guardadas del modelo SAEHD (lectura; {} si no se puede leer)."""
+    for dat in model_dir.glob("*_SAEHD_data.dat"):
+        try:
+            with open(dat, "rb") as fh:
+                data = pickle.load(fh)
+            saved = data.get("options", data) if isinstance(data, dict) else None
+            if isinstance(saved, dict):
+                return saved
+        except Exception as exc:
+            log.warning("No pude leer las opciones de %s: %s", dat, exc)
+    return {}
+
+
 def _patch_model_options(model_dir: Path, **opts) -> bool:
     """Edita las opciones guardadas del modelo SAEHD (…_data.dat, pickle plano).
 
@@ -901,7 +915,13 @@ def _optimizer_on_gpu(is_cuda: bool) -> bool:
 FINE_PHASE_ITERS = 80_000
 
 
-def _phase_opts(is_cuda: bool, remaining: int) -> dict:
+# Fuerza del GAN en la fase de pulido. El help de DFL: "Typical fine value is
+# 0.1". Más alto = más detalle fino pero más chance de artefactos.
+GAN_POWER_FINE = float(os.environ.get("FUSER_DFM_GAN_POWER", "0.1"))
+
+
+def _phase_opts(is_cuda: bool, remaining: int, model: Optional[Path] = None,
+                sin_gan: bool = False) -> dict:
     """Opciones de entrenamiento por FASE, decididas en cada start/resume.
 
     Por qué existe (auditoría 2026-07-26): el modelo se siembra del preentrenado
@@ -926,13 +946,59 @@ def _phase_opts(is_cuda: bool, remaining: int) -> dict:
     sin esta prioridad pesan casi nada en el error y el decoder dibuja un ojo
     promedio. Cuesta dos reduce_mean por iteración (~1-3%): barato para lo que
     arregla. Viene apagado por defecto y se heredaba así del preentrenado RTT.
+
+    ``gan_power`` (2026-07-27) se enciende SOLO en la fase de pulido, junto con
+    lr_dropout, que es la condición que pide el help de DFL ("enable it only
+    when the face is trained enough with lr_dropout(on)"). Es la palanca de
+    poros y microtextura: fuerza al modelo a aprender el detalle fino que el
+    error L1/SSIM por sí solo no premia. Dos reglas heredadas del propio DFL:
+      - "**and don't disable**": una vez encendido NO se apaga. Por eso se mira
+        el .dat: si ya venía con gan>0, sigue encendido aunque el objetivo se
+        haya movido (retomar tras 'done' recalcula ``remaining`` y lo habría
+        apagado solo).
+      - Cuesta un sess.run entero más por iteración (~20-30%) y crea una red
+        discriminadora CON SU PROPIO OPTIMIZADOR, que va a la misma memoria que
+        el resto: con 7,6/8,2 GB de VRAM puede no entrar. ``sin_gan`` permite
+        forzarlo apagado tras un OOM (ver la red de seguridad en ``start``).
     """
-    opts = {"gan_power": 0.0, "true_face_power": 0.0, "eyes_mouth_prio": True}
+    fine = remaining <= FINE_PHASE_ITERS
+    opts = {"true_face_power": 0.0, "eyes_mouth_prio": True}
     if is_cuda:
         opts["lr_dropout"] = "n"
     else:
-        opts["lr_dropout"] = "y" if remaining <= FINE_PHASE_ITERS else "n"
+        opts["lr_dropout"] = "y" if fine else "n"
+    ya_activo = False
+    if model is not None:
+        try:
+            ya_activo = float(_read_model_options(model).get("gan_power", 0) or 0) > 0
+        except (TypeError, ValueError):
+            ya_activo = False
+    opts["gan_power"] = 0.0 if sin_gan else (GAN_POWER_FINE if (fine or ya_activo) else 0.0)
     return opts
+
+
+def _espera_primera_iteracion(proc, logf: Path, timeout: int = 240) -> bool:
+    """¿El entrenamiento llegó a iterar? True si sí; False si murió antes.
+
+    DFL construye el grafo y recién después itera. Un OOM (p. ej. el GAN que no
+    entra en VRAM) mata el proceso EN ESA construcción, sin escribir ninguna
+    línea de iteración. Miramos el log —``[#iter][NNNms]``— porque es la única
+    señal inequívoca de que está entrenando de verdad. Si el proceso sigue vivo
+    al vencer el plazo lo damos por bueno: puede ser una máquina lenta cargando
+    muestras, y matarlo sería peor que esperar.
+    """
+    patron = re.compile(r"\]\[\d+ms\]")
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            if patron.search(logf.read_text("utf-8", errors="ignore")[-8000:]):
+                return True
+        except OSError:
+            pass
+        if proc.poll() is not None:
+            return False                      # murió sin iterar ni una vez
+        time.sleep(3)
+    return proc.poll() is None
 
 
 def start(name: str, backend: Optional[str] = None) -> str:
@@ -986,7 +1052,12 @@ def start(name: str, backend: Optional[str] = None) -> str:
     _is_cuda = _paths(backend)["backend"] == "cuda"
     _opt_gpu = _optimizer_on_gpu(_is_cuda)
     _opts = {"write_preview_history": True, "models_opt_on_gpu": _opt_gpu}
-    _opts.update(_phase_opts(_is_cuda, remaining=max(0, target - cur)))
+    _gan_previo = float(_read_model_options(model).get("gan_power", 0) or 0)
+    _opts.update(_phase_opts(_is_cuda, remaining=max(0, target - cur), model=model,
+                             sin_gan=bool(st.get("gan_no_entra"))))
+    # ¿Es el PRIMER arranque con GAN? Entonces hay que verificar que entre en VRAM
+    # antes de darlo por bueno (el discriminador y su optimizador son memoria nueva).
+    _gan_estrena = _opts.get("gan_power", 0) > 0 and _gan_previo <= 0
     _patch_model_options(model, **_opts)
     if _model_iter(model) <= 1:      # recién sembrado del RTT y aún sin entrenar
         _reset_preview_samples(model)
@@ -1002,20 +1073,44 @@ def start(name: str, backend: Optional[str] = None) -> str:
             os.replace(logf, ws.parent / "train.prev.log")
         except OSError:
             pass
-    proc = _run_dfl([
-        "train",
-        "--training-data-src-dir", str(ws / "data_src" / "aligned"),
-        "--training-data-dst-dir", str(ws / "data_dst" / "aligned"),
-        "--model-dir", str(model),
-        "--model", "SAEHD",
-        "--silent-start", "--no-preview",
-    ], logf, detach=True, backend=backend)
+    def _lanzar():
+        p = _run_dfl([
+            "train",
+            "--training-data-src-dir", str(ws / "data_src" / "aligned"),
+            "--training-data-dst-dir", str(ws / "data_dst" / "aligned"),
+            "--model-dir", str(model),
+            "--model", "SAEHD",
+            "--silent-start", "--no-preview",
+        ], logf, detach=True, backend=backend)
+        (ws.parent / "train.pid").write_text(str(p.pid), encoding="utf-8")
+        return p
+
+    proc = _lanzar()
+    aviso = ""
+    if _gan_estrena:
+        # RED DE SEGURIDAD del estreno del GAN: el discriminador + su optimizador
+        # son VRAM nueva sobre 7,6/8,2 GB ya ocupados. Si no entra, DFL muere
+        # construyendo el grafo (los pesos quedan intactos) — y sin esto el
+        # usuario se enteraría a la mañana siguiente, con la noche perdida.
+        if _espera_primera_iteracion(proc, logf):
+            aviso = (f"\n\n🧬 **Fase de pulido**: GAN activado (power {GAN_POWER_FINE}) "
+                     f"— aprende poros y microtextura. Verificado que entra en VRAM. "
+                     f"Cada iteración cuesta ~20-30% más.")
+        else:
+            log.warning("El GAN no entró en VRAM: relanzo sin GAN.")
+            _patch_model_options(model, gan_power=0.0)
+            _write_state(slug, gan_no_entra=True)
+            proc = _lanzar()
+            aviso = ("\n\n⚠️ **El GAN no entra en la VRAM de esta placa** (el "
+                     "discriminador necesita memoria que no hay con 8 GB). Relancé "
+                     "sin GAN para no perder la sesión; el resto del pulido "
+                     "(lr_dropout) sigue activo. Queda anotado para no reintentarlo.")
     (ws.parent / "train.pid").write_text(str(proc.pid), encoding="utf-8")
     _write_state(slug, phase="training", name=name, target_iters=target,
                  backend=backend, started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
     return (f"🏋️ Entrenamiento lanzado con «{BACKENDS[backend]['label']}» (pid {proc.pid}, "
             f"iter actual {cur:,} → objetivo {target:,}). Corre en segundo plano aunque "
-            f"cierres Fuser.")
+            f"cierres Fuser.{aviso}")
 
 
 def _pid_of(slug: str) -> Optional[int]:
