@@ -390,6 +390,50 @@ class FaceFusionSwapper(BaseFaceSwapper):
         except Exception as exc:  # pragma: no cover - degradación: sin hyperswap
             log.warning("No se pudo registrar hyperswap (%s); sigue disponible el resto.", exc)
 
+    def _register_pool_per_model(self) -> None:
+        """Parche runtime: la clave del caché de sesiones de FaceFusion debe
+        incluir EL MODELO, no solo el módulo.
+
+        Bug de FF 3.1.1 (reproducido 2026-07-29): ``inference_manager`` indexa
+        sus pools por ``módulo + providers`` (get_inference_context). El primer
+        .dfm que se carga en el proceso queda pegado: al elegir OTRO modelo,
+        get_inference_pool encuentra la entrada existente y devuelve la sesión
+        del modelo ANTERIOR — el nuevo .dfm se ignora en silencio. Reproducido
+        con dos .dfm distintos dando salidas idénticas al milésimo. Síntoma del
+        usuario: "con este .dfm queda la cara original" (el pool retenía un
+        modelo de prueba casi sin entrenar, de efecto ~nulo).
+
+        Mismo defecto aplica al swapper one-shot (inswapper→hififace) — hasta
+        ahora lo salvaba que unload() limpia el pool al recargar el pipeline,
+        pero esta es la defensa de raíz: con el modelo en la clave, cambiar de
+        modelo NUNCA puede devolver la sesión de otro.
+        """
+        from facefusion import inference_manager as im
+        from facefusion import state_manager as sm
+
+        if getattr(im, "_fuser_pool_per_model", False):
+            return
+        orig = im.get_inference_context
+
+        def ctx_por_modelo(model_context: str) -> str:
+            ctx = orig(model_context)
+            try:
+                if "deep_swapper" in model_context:
+                    mid = sm.get_item("deep_swapper_model") or ""
+                    if mid:
+                        ctx = f"{ctx}.{mid}"
+                elif "face_swapper" in model_context:
+                    mid = sm.get_item("face_swapper_model") or ""
+                    if mid:
+                        ctx = f"{ctx}.{mid}"
+            except Exception:  # pragma: no cover - ante la duda, clave original
+                pass
+            return ctx
+
+        im.get_inference_context = ctx_por_modelo
+        im._fuser_pool_per_model = True
+        log.info("Pools de FaceFusion indexados POR MODELO (fix del .dfm pegado).")
+
     def _register_swapper_weight(self) -> None:
         """Backport de ``--face-swapper-weight`` (FaceFusion 3.4.0) a la 3.1.1.
 
@@ -670,6 +714,7 @@ class FaceFusionSwapper(BaseFaceSwapper):
         self._import()
         self._register_hyperswap()
         self._register_swapper_weight()
+        self._register_pool_per_model()
         self._init_ff_defaults()
         self._configure()
         if progress:
