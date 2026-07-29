@@ -977,6 +977,45 @@ def _phase_opts(is_cuda: bool, remaining: int, model: Optional[Path] = None,
     return opts
 
 
+def _vram_ocupada_mb() -> Optional[int]:
+    """VRAM total en uso (MB) según nvidia-smi; None si no se puede medir."""
+    try:
+        r = subprocess.run(
+            [r"C:\Windows\System32\nvidia-smi.exe", "--query-gpu=memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15)
+        return int(r.stdout.strip().splitlines()[0])
+    except Exception:
+        return None
+
+
+# Umbral de VRAM ocupada por encima del cual NO se lanza un entrenamiento.
+# Escritorio ocioso ≈ 0,9-1,3 GB; un montaje/preview cargado ≈ 5,5 GB. 0 = off.
+VRAM_GUARD_MB = int(os.environ.get("FUSER_DFM_VRAM_GUARD_MB", "2500"))
+
+
+def _check_gpu_despejada() -> None:
+    """Corta el arranque del entrenamiento si la GPU ya está ocupada.
+
+    La guarda inversa ya existía (no montar con un entrenamiento vivo); esta
+    dirección faltaba: retomar el entrenamiento MIENTRAS un montaje/preview
+    tiene sus modelos cargados deja al entrenamiento sin VRAM → DirectML
+    derrama a RAM (lento sin avisar) y bajo presión extrema es el principal
+    sospechoso del colapso de pesos del 2026-07-29. Medir la VRAM real atrapa
+    CUALQUIER consumidor (montaje en curso, preview, otra app), sin banderas.
+    """
+    if VRAM_GUARD_MB <= 0:
+        return
+    usada = _vram_ocupada_mb()
+    if usada is not None and usada > VRAM_GUARD_MB:
+        raise ValueError(
+            f"La GPU ya tiene {usada} MB ocupados (umbral {VRAM_GUARD_MB}): hay un "
+            f"montaje/preview en curso o modelos cargados. Entrenar así derrama a "
+            f"RAM (todo lento) y arriesga los pesos. Esperá a que termine el "
+            f"montaje —o Detenelo— y retomá; si es la app reteniendo memoria, "
+            f"relanzala primero.")
+
+
 def _espera_primera_iteracion(proc, logf: Path, timeout: int = 240) -> bool:
     """¿El entrenamiento llegó a iterar? True si sí; False si murió antes.
 
@@ -1033,6 +1072,7 @@ def start(name: str, backend: Optional[str] = None) -> str:
             f"UN entrenamiento a la vez. Pausalo primero (⏸️ en su pestaña) y "
             f"después arrancá este. No perdés tiempo total: dos a la vez irían "
             f"cada uno a menos de la mitad de velocidad.")
+    _check_gpu_despejada()   # y tampoco arrancar sobre un montaje/preview activo
     # objetivo con LÍNEA BASE del contador del modelo (el iter de SAEHD persiste
     # en el .dat): primer arranque → base+objetivo; retomar tras 'done' → +extra.
     cur = _model_iter(model)
@@ -1051,7 +1091,14 @@ def start(name: str, backend: Optional[str] = None) -> str:
     # optimizador (medido). En CUDA va en la GPU.
     _is_cuda = _paths(backend)["backend"] == "cuda"
     _opt_gpu = _optimizer_on_gpu(_is_cuda)
-    _opts = {"write_preview_history": True, "models_opt_on_gpu": _opt_gpu}
+    # autobackup_hour=1: DFL guarda una copia COMPLETA del modelo cada hora en
+    # model/<nombre>_autobackups/ (01=la más nueva, rota hasta 24 ≈ 50 GB máx).
+    # Se fuerza SIEMPRE tras el colapso del 2026-07-29: los pesos se rompieron
+    # en una corrida, el autoguardado de 5 min cementó la rotura pisando la
+    # única copia y no había NINGÚN backup — 232k iteraciones sin red. Con esto
+    # un colapso cuesta a lo sumo una hora de entrenamiento.
+    _opts = {"write_preview_history": True, "models_opt_on_gpu": _opt_gpu,
+             "autobackup_hour": int(os.environ.get("FUSER_DFM_AUTOBACKUP_HOUR", "1"))}
     _gan_previo = float(_read_model_options(model).get("gan_power", 0) or 0)
     _opts.update(_phase_opts(_is_cuda, remaining=max(0, target - cur), model=model,
                              sin_gan=bool(st.get("gan_no_entra"))))
