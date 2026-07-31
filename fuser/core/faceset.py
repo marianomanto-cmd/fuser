@@ -61,19 +61,6 @@ def release_detector() -> None:
         gc.collect()
 
 
-# Distancia media (en fracción de la interocular) por debajo de la cual dos
-# juegos de kps normalizados se consideran LA MISMA pose/expresión. Frames
-# vecinos de video caen < 0.02; un cambio real de expresión mueve las comisuras
-# varios % de la interocular y supera el umbral.
-MISMA_POSE_UMBRAL = 0.05
-
-
-def _misma_pose(kps_a, kps_b) -> bool:
-    """True si dos kps normalizados/centrados describen la misma pose+expresión."""
-    d = float(np.linalg.norm(np.asarray(kps_a) - np.asarray(kps_b), axis=1).mean())
-    return d < MISMA_POSE_UMBRAL
-
-
 def iter_images(root: Path):
     for p in sorted(Path(root).rglob("*")):
         if p.is_file() and p.suffix.lower() in IMG_EXTS:
@@ -100,7 +87,6 @@ def curate(
     paths = [Path(p) for p in image_paths if p]
     det = _detector()
     kept, kept_embs, kept_yaw = [], [], []
-    kept_kps_n: List = []
     drop = Counter()
     dropped_examples: dict = {}
     total = max(1, len(paths))
@@ -133,22 +119,11 @@ def curate(
         if mean_v < 25 or mean_v > 235:
             _drop("luz_mala", p); continue
         emb = f.normed_embedding
+        if kept_embs and float(np.max(np.dot(np.array(kept_embs), emb))) > dedup:
+            _drop("casi_duplicadas", p); continue
         kps = f.kps
         io = float(np.linalg.norm(kps[0] - kps[1])) + 1e-6
-        kps_n = (np.asarray(kps, dtype=np.float32) - np.asarray(kps).mean(axis=0)) / io
-        # Dedup en DOS condiciones (auditoría de calidad 2026-07-30): ArcFace es
-        # invariante a la EXPRESIÓN por diseño, así que dos frames de la misma
-        # persona con expresiones DISTINTAS pueden dar cos > 0.96 — dedup por
-        # embedding solo tiraba justo la variedad de expresiones que el modelo
-        # necesita (síntoma final: expresiones que el .dfm no sabe hacer, p. ej.
-        # cejas levantadas). Solo se descarta si además la GEOMETRÍA coincide
-        # (kps normalizados por interocular): eso sí es el mismo frame repetido.
-        if kept_embs:
-            sims = np.dot(np.array(kept_embs), emb)
-            j = int(np.argmax(sims))
-            if float(sims[j]) > dedup and _misma_pose(kept_kps_n[j], kps_n):
-                _drop("casi_duplicadas", p); continue
-        kept.append(p); kept_embs.append(emb); kept_kps_n.append(kps_n)
+        kept.append(p); kept_embs.append(emb)
         kept_yaw.append(float((kps[2][0] - (kps[0][0] + kps[1][0]) / 2) / io))
 
     report = {
