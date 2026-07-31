@@ -116,20 +116,21 @@ def bg_status_md() -> str:
         return f"⚠️ No pude consultar los procesos de fondo: {exc}"
     if vivos:
         nombres = ", ".join(f"«{n}»" for n in vivos)
-        return (f"🔴 **Fondo: ENTRENANDO a {nombres}** — la GPU está tomada "
-                f"(~7,6/8,2 GB). ⏸️ Pausá antes de montar o la app se cae.")
+        return (f"🔴 **Fondo: ENTRENANDO a {nombres}** — la GPU está tomada. "
+                f"⏸️ Pausá antes de montar: no entran los dos a la vez.")
     return "🟢 **Fondo: GPU libre** — sin entrenamientos corriendo; podés montar."
 
 
 def ensure_gpu_libre(accion: str = "el montaje") -> None:
     """Bloquea las acciones de GPU (montaje/preview/cola) si hay un entrenamiento vivo.
 
-    Con el optimizador en GPU, un entrenamiento DFL ocupa ~7,6 de los 8,2 GB de
-    VRAM. Si en ese estado se intenta un swap, DirectML no puede reservar memoria
-    al cargar los modelos y MATA EL PROCESO ENTERO sin excepción de Python — el
-    usuario ve "Broken Connection" y la app muerta (pasó 2026-07-26, dos veces,
-    con el crash capturado justo en la carga del detector). Mejor un mensaje
-    claro ANTES de tocar la GPU.
+    Un entrenamiento DFL con el optimizador en GPU se lleva casi toda la placa
+    (el batch se dimensiona con la VRAM disponible, así que esto vale para
+    cualquier tarjeta). Si en ese estado se intenta un swap, DirectML no puede
+    reservar memoria al cargar los modelos y MATA EL PROCESO ENTERO sin
+    excepción de Python — el usuario ve "Broken Connection" y la app muerta
+    (pasó 2026-07-26, dos veces, con el crash capturado justo en la carga del
+    detector). Mejor un mensaje claro ANTES de tocar la GPU.
     """
     from ..core import dfm_trainer
     try:

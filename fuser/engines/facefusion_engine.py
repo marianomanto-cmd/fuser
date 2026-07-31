@@ -550,7 +550,12 @@ class FaceFusionSwapper(BaseFaceSwapper):
         # entra -> crash duro = "connection lost"). Usamos al menos "moderate" para
         # que FaceFusion COMBINE VRAM+RAM (descarga modelos a RAM cuando hace falta).
         strategy = _VRAM_STRATEGY.get(s.memory_mode, "moderate")
-        if self.mm.info.gpu_provider == "DmlExecutionProvider" and strategy == "tolerant":
+        if (self.mm.info.gpu_provider == "DmlExecutionProvider" and strategy == "tolerant"
+                and (self.mm.info.vram_total_gb or 8) < 12):
+            # El downgrade existe porque en 8 GB "tolerant" mantiene TODO en VRAM
+            # y CodeFormer ya no entraba (crash duro). Con 12 GB o más sí entra
+            # todo el juego de modelos y "tolerant" evita descargar/recargar a
+            # RAM entre frames, que es tiempo puro.
             strategy = "moderate"
         self._set("video_memory_strategy", strategy)
 

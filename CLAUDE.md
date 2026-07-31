@@ -23,9 +23,19 @@ musicales**. Tres pestañas:
   ANTES en todas las acciones de GPU.
 
 ## Hardware objetivo (y VERDADES de esta máquina — leer antes de tocar nada)
-- GPU NVIDIA 8 GB VRAM, 40 GB RAM. En ESTA máquina: **DirectML** (onnxruntime-directml 1.24.4;
-  1.17.3 diverge aquí). El build CUDA de DeepFaceLab CONGELA en la 4060 Ti → se usa el build
-  **DirectX12** (entrena ~3s/iter, res 224).
+- **GPU: RTX 5070 Ti, 16 GB VRAM** (Blackwell sm_120, driver 610.88) desde 2026-07-30.
+  **RAM del sistema: 39,8 GB — NO cambió** con la placa nueva. Ese es el error clásico al
+  redimensionar: casi todos los topes de la app (`RAM_FRACTIONS`, `prefetch_frames`,
+  el tope de 480 frames de `buffer_sizes`, `two_pass_chunk`, la guardia del QC) miden
+  **RAM del sistema** y NO deben subirse porque haya más VRAM.
+- **DirectML** (onnxruntime-directml 1.24.4; 1.17.3 diverge aquí). Verificado en Blackwell:
+  DML computa igual que CPU (MAD 0,0002 sobre el deep swapper) — sin regresiones de arquitectura.
+- El build CUDA de DeepFaceLab (2021, PTX compute_80) NO sirve en Ada ni en Blackwell → se usa
+  el build **DirectX12**. Con optimizador en GPU y batch dimensionado por VRAM: ~440 ms/iter
+  a batch 8 en la 5070 Ti (594 ms en la 4060 Ti), y el batch ahora sube solo a 16.
+- Lo que SÍ escala con la placa: `_batch_recomendado` (dfm_trainer) y `gpu_mem_frac`
+  (config/memory_manager). Ojo: `gpu_mem_limit` **solo lo aplica CUDA**; en DirectML es
+  informativo.
 - **LEY: un modelo ONNX por subproceso** — DirectML retiene la VRAM entre modelos en un mismo
   proceso (colgado silencioso). Vale para benchmarks Y para la síntesis (`faceset_synth._run_pass`
   spawnea `python -m fuser.core.faceset_synth passN`).

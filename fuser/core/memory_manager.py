@@ -45,6 +45,26 @@ class MemoryManager:
             log.warning("Sin CUDA: todo correrá en CPU (lento; usar solo para probar la UI).")
 
     # ----- Execution providers -------------------------------------------------
+    @property
+    def gpu_mem_limit_gb(self) -> float:
+        """Techo de arena por sesión, derivado de la VRAM REAL de la placa.
+
+        Antes era un número fijo por preset (7,0 GB) calibrado para una placa de
+        8 GB: en una de 16 dejaba media tarjeta sin usar. Ahora se toma como
+        fracción de la VRAM total, con el número viejo de piso y como fallback
+        si no se puede leer la VRAM. Se usa ``vram_total_gb`` (no la libre): el
+        valor entra en la firma de caché del pipeline y tiene que ser estable.
+
+        OJO: onnxruntime aplica este techo SOLO en CUDA. Bajo DirectML —esta
+        máquina— el provider no acepta la opción y el valor es informativo.
+        """
+        base = float(self.settings.gpu_mem_limit_gb or 0.0)
+        vram = self.info.vram_total_gb
+        frac = float(self.settings.preset.get("gpu_mem_frac", 0) or 0)
+        if not vram or not frac:
+            return base
+        return max(base, min(vram * frac, vram - 1.0))
+
     def _cuda_options(self) -> dict:
         # onnxruntime exige que los valores de las opciones de provider sean
         # strings, así que serializamos todo a str para máxima compatibilidad.
@@ -53,7 +73,7 @@ class MemoryManager:
             # Solo crece la arena cuando se pide -> menos VRAM reservada de más.
             "arena_extend_strategy": "kSameAsRequested",
             # Techo de VRAM por sesión: evita que un modelo se coma toda la tarjeta.
-            "gpu_mem_limit": str(int(self.settings.gpu_mem_limit_gb * GIB)),
+            "gpu_mem_limit": str(int(self.gpu_mem_limit_gb * GIB)),
             # HEURISTIC evita el "warm-up" exhaustivo que dispara la VRAM.
             "cudnn_conv_algo_search": "HEURISTIC",
             "do_copy_in_default_stream": "1",
@@ -297,11 +317,16 @@ class MemoryManager:
         return "\n".join(lines)
 
     def summary(self) -> str:
-        backend = "DirectML" if self.info.gpu_provider == "DmlExecutionProvider" else "CUDA"
+        es_dml = self.info.gpu_provider == "DmlExecutionProvider"
+        backend = "DirectML" if es_dml else "CUDA"
         dev = f"GPU ({backend})" if self.use_gpu else "CPU"
         enh = "CPU/RAM" if self.enhancer_providers() == self._cpu_providers() else dev
+        # El techo de arena SOLO existe en CUDA: bajo DirectML anunciarlo era
+        # mentirle al log (el provider ni siquiera recibe la opción).
+        lim = ("n/a (DirectML)" if es_dml else f"{self.gpu_mem_limit_gb:.1f} GB")
+        vram = f"{self.info.vram_total_gb:.1f} GB" if self.info.vram_total_gb else "?"
         return (
-            f"Cómputo: {dev} | Enhancer: {enh} | "
-            f"Límite VRAM/sesión: {self.settings.gpu_mem_limit_gb:.1f} GB | "
+            f"Cómputo: {dev} | VRAM: {vram} | Enhancer: {enh} | "
+            f"Límite VRAM/sesión: {lim} | "
             f"det_size: {self.det_size} | RAM: {self.settings.ram_mode} | motor: {self.settings.engine}"
         )

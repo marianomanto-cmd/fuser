@@ -50,53 +50,60 @@ MODE_EXTREME_LOW_VRAM = "extreme_low_vram"
 
 # Etiquetas legibles para la UI -> clave interna.
 MEMORY_MODE_LABELS: Dict[str, str] = {
-    "Calidad máxima (usa toda la VRAM)": MODE_MAX_QUALITY,
-    "Equilibrado (recomendado, 8 GB)": MODE_BALANCED,
-    "Bajo VRAM (6 GB o menos)": MODE_LOW_VRAM,
-    "VRAM mínima / usar más RAM (4 GB)": MODE_EXTREME_LOW_VRAM,
+    "Calidad máxima (arena grande, detector 640)": MODE_MAX_QUALITY,
+    "Equilibrado (recomendado; deja VRAM libre para el escritorio)": MODE_BALANCED,
+    "Bajo VRAM (arena reducida)": MODE_LOW_VRAM,
+    "VRAM mínima / enhancer en CPU-RAM": MODE_EXTREME_LOW_VRAM,
 }
 
 # Parámetros que cambian con cada modo de memoria.
-#   gpu_mem_limit_gb : límite de arena de memoria de onnxruntime por sesión GPU.
-#   det_size         : resolución del detector de caras (mayor = detecta más / más VRAM).
+#   gpu_mem_frac     : fracción de la VRAM TOTAL de la placa para la arena de
+#                      onnxruntime. Reemplaza al número fijo, que estaba
+#                      dimensionado para 8 GB y dejaba media placa sin usar en
+#                      una de 16. OJO: onnxruntime SOLO aplica este techo en
+#                      CUDA; bajo DirectML (esta máquina) es informativo.
+#   gpu_mem_limit_gb : fallback absoluto si no se puede leer la VRAM (sin NVML).
+#   det_size         : resolución del detector. 640 NO es una perilla de VRAM:
+#                      yoloface tiene la entrada FIJA en 640x640 y FaceFusion
+#                      solo acepta ese valor — poner menos daba INVALID_ARGUMENT.
 #   enhancer_device  : dónde corre el enhancer ("gpu" o "cpu" -> offload a RAM/CPU).
 #   prefetch_frames  : nº de frames decodificados que mantenemos en RAM (buffer).
-#   writer_queue     : nº de frames procesados en cola para escribir a disco.
-#   det_batch        : nº de frames que se detectan por lote (reuso de la sesión).
+#                      ¡RAM del sistema, no VRAM! No escala con la placa.
+#   writer_queue     : nº de frames procesados en cola para escribir a disco (RAM).
 MEMORY_PRESETS: Dict[str, dict] = {
     MODE_MAX_QUALITY: dict(
+        gpu_mem_frac=0.875,
         gpu_mem_limit_gb=7.0,
         det_size=640,
         enhancer_device="gpu",
         prefetch_frames=96,
         writer_queue=96,
-        det_batch=1,
     ),
     MODE_BALANCED: dict(
+        gpu_mem_frac=0.69,
         gpu_mem_limit_gb=5.5,
         det_size=640,
         enhancer_device="gpu",
         prefetch_frames=64,
         writer_queue=64,
-        det_batch=1,
     ),
     MODE_LOW_VRAM: dict(
+        gpu_mem_frac=0.475,
         gpu_mem_limit_gb=3.8,
-        det_size=512,
+        det_size=640,
         enhancer_device="gpu",
         prefetch_frames=32,
         writer_queue=32,
-        det_batch=1,
     ),
     MODE_EXTREME_LOW_VRAM: dict(
+        gpu_mem_frac=0.30,
         gpu_mem_limit_gb=2.4,
-        det_size=320,
+        det_size=640,
         # El enhancer se mueve a CPU: libera VRAM a costa de velocidad,
         # aprovechando la RAM y los núcleos del sistema.
         enhancer_device="cpu",
         prefetch_frames=16,
         writer_queue=16,
-        det_batch=1,
     ),
 }
 

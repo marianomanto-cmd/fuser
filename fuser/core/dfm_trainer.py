@@ -773,10 +773,10 @@ def prepare(name: str, src_dir: Path, dst_videos: List[str],
             seeded += 1
     if seeded == 0:
         raise RuntimeError("El preentrenado RTT no está instalado (paso ②).")
-    # MAXIMIZAR VRAM+RAM (principio de la app): optimizer a RAM (40 GB) libera
-    # VRAM → batch más alto = más VRAM útil por iteración. Env-tuneable; el
-    # harness de prueba valida el valor en esta GPU (8GB DX12, res 224).
-    batch = int(os.environ.get("FUSER_DFM_BATCH", "8"))
+    # MAXIMIZAR VRAM (principio de la app): el batch se dimensiona con la VRAM
+    # REAL de la placa (ver _batch_recomendado), no con un 8 fijo heredado de
+    # los 8 GB. Env-tuneable con FUSER_DFM_BATCH.
+    batch = _batch_recomendado(224)
     # write_preview_history: DFL guarda en <modelo>_history/ una imagen por
     # autoguardado (cada 5 min) con [tu cara | reconstruida | destino |
     # reconstruido | TU CARA EN EL DESTINO]. Es la ventana para ver si el
@@ -977,6 +977,58 @@ def _phase_opts(is_cuda: bool, remaining: int, model: Optional[Path] = None,
     return opts
 
 
+# --- Dimensionado del batch según la VRAM real de la placa -------------------
+# Calibrado con mediciones de esta sesión a res 224, archi liae-udt:
+#   batch 8 + optimizador en GPU = 7.600 MB  ·  optimizador en RAM = 5.400 MB
+#   -> slots del optimizador ~2.200 MB (2× pesos); pesos ~1.100 MB
+#   -> lo que ESCALA con el batch ~3.520 MB en batch 8 = ~440 MB por unidad
+BATCH_FIJO_MB = 4080          # pesos + optimizador + buffers (no escala con batch)
+BATCH_POR_UNIDAD_MB = 440     # activaciones por unidad de batch
+BATCH_RESERVA_MB = 1000       # aire para el escritorio y los picos del allocator
+# Techo: más allá de 16 el ms/iter sube casi proporcional al batch, así que la
+# ganancia por IMAGEN se aplana, y apretar la VRAM es justo lo que dispara el
+# derrame silencioso de DirectML. 16 es el punto con margen holgado en 16 GB.
+BATCH_MAX = 16
+BATCH_MIN = 4
+
+
+def _vram_total_mb() -> Optional[int]:
+    """VRAM total de la placa (MB) según nvidia-smi; None si no se puede medir."""
+    try:
+        r = subprocess.run(
+            [r"C:\Windows\System32\nvidia-smi.exe", "--query-gpu=memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15)
+        return int(r.stdout.strip().splitlines()[0])
+    except Exception:
+        return None
+
+
+def _batch_recomendado(resolution: int = 224) -> int:
+    """Batch que entra en ESTA placa. ``FUSER_DFM_BATCH`` lo fuerza.
+
+    El batch era 8 fijo, dimensionado para 8 GB de VRAM. Con una placa de 16 GB
+    eso deja la mitad de la memoria sin usar y el entrenamiento procesa la mitad
+    de imágenes por iteración de las que podría: el ms/iter mejora poco pero las
+    IMÁGENES POR SEGUNDO —que es lo que realmente avanza el modelo— se quedan
+    cortas. Las activaciones escalan con res², así que el cálculo se ajusta si
+    el modelo no es de 224.
+    """
+    env = os.environ.get("FUSER_DFM_BATCH")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    total = _vram_total_mb()
+    if not total:
+        return 8                              # sin medición: el valor histórico
+    escala = (max(64, int(resolution)) / 224.0) ** 2
+    disponible = total - BATCH_FIJO_MB * escala - BATCH_RESERVA_MB
+    n = int(disponible // (BATCH_POR_UNIDAD_MB * escala))
+    return max(BATCH_MIN, min(BATCH_MAX, n))
+
+
 def _vram_ocupada_mb() -> Optional[int]:
     """VRAM total en uso (MB) según nvidia-smi; None si no se puede medir."""
     try:
@@ -990,7 +1042,9 @@ def _vram_ocupada_mb() -> Optional[int]:
 
 
 # Umbral de VRAM ocupada por encima del cual NO se lanza un entrenamiento.
-# Escritorio ocioso ≈ 0,9-1,3 GB; un montaje/preview cargado ≈ 5,5 GB. 0 = off.
+# El escritorio ocioso ocupa ~0,9-1,4 GB (dwm + navegador) en cualquier placa;
+# un montaje/preview cargado son 5+ GB. 2500 MB separa bien esos dos mundos y
+# no depende del tamaño de la tarjeta. 0 = guarda apagada.
 VRAM_GUARD_MB = int(os.environ.get("FUSER_DFM_VRAM_GUARD_MB", "2500"))
 
 
@@ -1065,11 +1119,14 @@ def start(name: str, backend: Optional[str] = None) -> str:
     # dos tampoco entraban). Sin esta guarda, el segundo muere construyendo el
     # grafo con un "Resource exhausted" críptico de TensorFlow (visto 2026-07-26).
     # Dos a la vez tampoco convendría: cada uno iría a <50% — mismos días totales.
+    # UN entrenamiento a la vez: el batch se dimensiona para llenar la placa,
+    # así que dos nunca entran (con 16 GB, dos a batch 16 pedirían ~22 GB). Y
+    # aunque entraran no convendría: cada uno iría a menos de la mitad.
     otros = [n for n in running_trainings() if _slug(n) != slug]
     if otros:
         raise ValueError(
-            f"La GPU ya está entrenando a «{otros[0]}» y en esta placa solo entra "
-            f"UN entrenamiento a la vez. Pausalo primero (⏸️ en su pestaña) y "
+            f"La GPU ya está entrenando a «{otros[0]}» y solo entra UN "
+            f"entrenamiento a la vez. Pausalo primero (⏸️ en su pestaña) y "
             f"después arrancá este. No perdés tiempo total: dos a la vez irían "
             f"cada uno a menos de la mitad de velocidad.")
     _check_gpu_despejada()   # y tampoco arrancar sobre un montaje/preview activo
@@ -1099,7 +1156,18 @@ def start(name: str, backend: Optional[str] = None) -> str:
     # un colapso cuesta a lo sumo una hora de entrenamiento.
     _opts = {"write_preview_history": True, "models_opt_on_gpu": _opt_gpu,
              "autobackup_hour": int(os.environ.get("FUSER_DFM_AUTOBACKUP_HOUR", "1"))}
-    _gan_previo = float(_read_model_options(model).get("gan_power", 0) or 0)
+    # Batch según la VRAM de ESTA placa, también al RETOMAR: un modelo creado en
+    # una placa de 8 GB quedaba clavado en batch 8 para siempre. Solo se toca si
+    # cambia, y se avisa (cambiar el batch a mitad de camino no rompe los pesos
+    # pero sí altera la dinámica: conviene que el usuario lo vea).
+    _opts_previas = _read_model_options(model)
+    _gan_previo = float(_opts_previas.get("gan_power", 0) or 0)
+    _batch_previo = int(_opts_previas.get("batch_size") or 0)
+    _batch_nuevo = _batch_recomendado(int(_opts_previas.get("resolution") or 224))
+    if _batch_previo and _batch_nuevo != _batch_previo:
+        _opts["batch_size"] = _batch_nuevo
+        log.info("Batch ajustado a la VRAM de esta placa: %d -> %d",
+                 _batch_previo, _batch_nuevo)
     _opts.update(_phase_opts(_is_cuda, remaining=max(0, target - cur), model=model,
                              sin_gan=bool(st.get("gan_no_entra"))))
     # ¿Es el PRIMER arranque con GAN? Entonces hay que verificar que entre en VRAM
@@ -1155,6 +1223,11 @@ def start(name: str, backend: Optional[str] = None) -> str:
     (ws.parent / "train.pid").write_text(str(proc.pid), encoding="utf-8")
     _write_state(slug, phase="training", name=name, target_iters=target,
                  backend=backend, started_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    if _batch_previo and _batch_nuevo != _batch_previo:
+        aviso += (f"\n\n📦 **Batch {_batch_previo} → {_batch_nuevo}** para aprovechar la VRAM "
+                  f"de esta placa: procesa {_batch_nuevo / max(1, _batch_previo):.1f}× más "
+                  f"imágenes por iteración (la iteración tarda más, pero avanzás bastante "
+                  f"más rápido por imagen, que es lo que entrena al modelo).")
     return (f"🏋️ Entrenamiento lanzado con «{BACKENDS[backend]['label']}» (pid {proc.pid}, "
             f"iter actual {cur:,} → objetivo {target:,}). Corre en segundo plano aunque "
             f"cierres Fuser.{aviso}")
