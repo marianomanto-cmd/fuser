@@ -963,6 +963,15 @@ def _phase_opts(is_cuda: bool, remaining: int, model: Optional[Path] = None,
     """
     fine = remaining <= FINE_PHASE_ITERS
     opts = {"true_face_power": 0.0, "eyes_mouth_prio": True}
+    # ct_mode='rct' (auditoría de calidad 2026-07-30): transfiere el COLOR de las
+    # muestras destino a las fuente durante el entrenamiento → el modelo aprende
+    # a rendir bajo iluminaciones que no vio, que es exactamente el caso de uso
+    # (montar en cualquier video). El RTT venía con 'none' y se heredaba así.
+    opts["ct_mode"] = os.environ.get("FUSER_DFM_CT_MODE", "rct")
+    # random_warp por fase: ON en gruesa (generaliza expresiones), OFF en fina.
+    # No es opcional: el help de DFL condiciona el GAN a "lr_dropout(on) and
+    # random_warp(off)" — encender el GAN con warp activo es combo no soportado.
+    opts["random_warp"] = not fine
     if is_cuda:
         opts["lr_dropout"] = "n"
     else:

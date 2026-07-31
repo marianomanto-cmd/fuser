@@ -44,6 +44,12 @@ log = get_logger(__name__)
 # Reintentos por video en una cola: el que falla va al final y se reintenta.
 MAX_INTENTOS = 2
 
+# CRF del corte en partes. El corte re-encodea el video de ENTRADA antes del
+# swap: cada punto de CRF que se pierde acá degrada la materia prima de TODOS
+# los frames. Medido en stock (720p): CRF16=48,3 dB PSNR vs CRF10=54,3 dB —
+# +6 dB de fidelidad de fuente por ~40% más de disco temporal. Barato.
+CORTE_CRF = 10
+
 PARTES = [
     ("15 segundos (ver resultados muy seguido)", 15),
     ("30 segundos (equilibrado)", 30),
@@ -188,7 +194,9 @@ def _cortar(video: str, secs: int, out_dir: Path) -> List[Path]:
         raise gr.Error("FFmpeg no disponible.")
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = out_dir / "corte.json"
-    want = {"huella": _fp(video), "secs": int(secs)}
+    # crf en el manifiesto: al subir la calidad del corte, los cortes viejos
+    # (CRF 16) no deben reusarse como si fueran equivalentes.
+    want = {"huella": _fp(video), "secs": int(secs), "crf": CORTE_CRF}
     existentes = sorted(out_dir.glob("in_*.mp4"))
     if existentes:
         try:
@@ -199,7 +207,7 @@ def _cortar(video: str, secs: int, out_dir: Path) -> List[Path]:
         for viejo in existentes:        # corte de OTRO trabajo: no sirve
             viejo.unlink(missing_ok=True)
     cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", video,
-           "-c:v", "libx264", "-crf", "16", "-preset", "veryfast",
+           "-c:v", "libx264", "-crf", str(CORTE_CRF), "-preset", "veryfast",
            "-force_key_frames", f"expr:gte(t,n_forced*{int(secs)})",
            "-c:a", "aac", "-reset_timestamps", "1",
            "-f", "segment", "-segment_time", str(int(secs)),

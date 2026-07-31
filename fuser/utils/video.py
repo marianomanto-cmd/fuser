@@ -265,13 +265,46 @@ def concat_videos(paths: List[str], output: str, *, drop_seam: bool = True,
         # con -i + filtro POR PARTE: con ~230+ partes (video largo cortado de a
         # 15 s) supera los 32.767 caracteres de CreateProcess en Windows y la
         # unión falla SIEMPRE — tras horas de render (hallazgo de la revisión).
+        #
+        # Y se une con STREAM-COPY, no re-encodeando (auditoría de calidad
+        # 2026-07-30): las partes ya salieron del render con su CRF final;
+        # volver a codificarlas costaba una generación entera de calidad sobre
+        # los píxeles MÁS caros del pipeline (el swap terminado — medido: la
+        # unión re-encode dejaba el resultado a 52,8 dB PSNR de sus propias
+        # partes; el copy es idéntico por construcción). Si el copy produce un
+        # stream inválido (partes heterogéneas, p. ej. reanudación con ajustes
+        # viejos), se valida la duración y se cae al re-encode.
         lista = Path(str(output)).with_suffix(".concat.txt")
         try:
             lineas = []
+            dur_total = 0.0
             for p in paths:
                 seguro = str(Path(p).resolve()).replace("'", "'\\''")
                 lineas.append(f"file '{seguro}'")
+                try:
+                    dur_total += probe(p).duration
+                except Exception:
+                    pass
             lista.write_text("\n".join(lineas), encoding="utf-8")
+
+            copia = subprocess.run(
+                [ff, "-y", "-hide_banner", "-loglevel", "error",
+                 "-f", "concat", "-safe", "0", "-i", str(lista),
+                 "-c", "copy", str(output)],
+                capture_output=True)
+            if copia.returncode == 0:
+                try:
+                    dur_out = probe(str(output)).duration
+                except Exception:
+                    dur_out = 0.0
+                if dur_total <= 0 or dur_out >= 0.9 * dur_total:
+                    return True
+                log.warning("Concat copy dio duración %.1fs de %.1fs esperados: "
+                            "caigo al re-encode.", dur_out, dur_total)
+            else:  # pragma: no cover
+                log.warning("Concat copy falló (%s); caigo al re-encode.",
+                            (copia.stderr or b"").decode("utf-8", "ignore")[:200])
+
             cmd = [ff, "-y", "-hide_banner", "-loglevel", "error",
                    "-f", "concat", "-safe", "0", "-i", str(lista),
                    "-c:v", encoder, "-crf", str(crf), "-pix_fmt", "yuv420p",
@@ -362,19 +395,26 @@ def mux_audio(video_no_audio: str, original: str, output: str) -> bool:
 
     Devuelve True si se incrustó audio. El sufijo ``?`` en el mapeo hace que el
     audio sea opcional: si el original no tenía audio, no falla.
+
+    Primero intenta COPIAR la pista tal cual (cero pérdida — clave en videos
+    musicales: el audio del original suele ser AAC de alta calidad y
+    re-encodearlo a 192k lo degrada gratis); si el contenedor no acepta el
+    códec original, cae al re-encode AAC 192k de siempre.
     """
     ff = ffmpeg_path()
     if not ff:
         return False
-    cmd = [
-        ff, "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(video_no_audio), "-i", str(original),
-        "-map", "0:v:0", "-map", "1:a:0?",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", str(output),
-    ]
+    base = [ff, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_no_audio), "-i", str(original),
+            "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy"]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        r = subprocess.run(base + ["-c:a", "copy", "-shortest", str(output)],
+                           capture_output=True)
+        if r.returncode == 0 and Path(str(output)).is_file() \
+                and Path(str(output)).stat().st_size > 1000:
+            return True
+        subprocess.run(base + ["-c:a", "aac", "-b:a", "192k", "-shortest", str(output)],
+                       check=True, capture_output=True)
         return True
     except Exception as exc:  # pragma: no cover
         log.warning("No se pudo multiplexar el audio: %s", exc)
