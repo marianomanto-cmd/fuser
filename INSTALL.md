@@ -268,6 +268,66 @@ python -c "from fuser.engines.facefusion_engine import is_available; print(is_av
 
 ---
 
+## 🗑️ Desinstalar Fuser
+
+Un solo comando quita **todo lo que la instalación creó**: el `.venv`, el motor FaceFusion
+vendorizado, los modelos `.onnx`, el entrenador DeepFaceLab (build + preentrenados), las cachés,
+los accesos directos y la imagen Docker.
+
+```bash
+python scripts/uninstall.py --dry-run     # ① MIRA primero qué borraría (no borra nada)
+python scripts/uninstall.py               # ② desinstala (te pregunta antes)
+```
+
+En Windows podés ejecutar `scripts\uninstall.bat` con **doble clic**; en Linux/macOS,
+`bash scripts/uninstall.sh`. Corre con **cualquier Python** (solo stdlib): funciona aunque el
+`.venv` ya esté roto o borrado.
+
+### Tus datos NO se borran por defecto
+
+Se conservan siempre, salvo que lo pidas explícitamente:
+
+| Se conserva | Dónde |
+|---|---|
+| **Biblioteca de Caras** (tus fotos) | `faces/` (o `FUSER_FACES_DIR`) |
+| **Videos de salida** (tus resultados) | `outputs/` (o `FUSER_OUTPUT_DIR`) |
+| **Workspaces de entrenamiento** | `<DFL>/workspaces/` |
+
+Además, **antes de borrar nada** el script busca tus modelos `.dfm` entrenados —que viven *dentro*
+de las carpetas que se eliminan— y los copia a `../fuser_dfm_backup/`. Son días o semanas de GPU:
+no se pierden por una desinstalación.
+
+Para borrar **también** eso (desinstalación total, irreversible):
+
+```bash
+python scripts/uninstall.py --purge-data --remove-repo
+```
+
+### Opciones
+
+| Opción | Qué hace |
+|---|---|
+| `--dry-run` | Muestra el plan con tamaños; no borra nada |
+| `-y`, `--yes` | No pregunta (conserva tus datos igual) |
+| `--purge-data` | Borra **también** caras, salidas y workspaces de entrenamiento |
+| `--remove-repo` | Borra **también** el código fuente (esta carpeta) |
+| `--skip-docker` | No toca la imagen ni los contenedores Docker |
+| `--force` | Desinstala aunque la app o un entrenamiento estén corriendo |
+
+### Por qué no alcanza con borrar la carpeta a mano
+
+- `vendor/facefusion/.assets/models` es un **junction** a `E:\modelos\facefusion`. Un borrado
+  recursivo normal (`rmdir /s`, arrastrar a la papelera) **atraviesa el junction y vacía el disco E:**.
+  El desinstalador **desmonta** todos los enlaces antes de tocar nada, así que el destino queda intacto
+  hasta que se lo borra a propósito y por separado.
+- El entrenador y sus modelos **no están en la carpeta del repo** (viven en `E:\modelos\deepfacelab`,
+  o donde apunte `FUSER_DFL_DIR`): borrar el repo los deja ocupando decenas de GB.
+- Si hay un **entrenamiento DFL vivo**, el script **se niega a correr** (código de salida `2`):
+  matarlo a media corrida puede corromper el modelo en disco. Cerrá la app y pausá el entrenamiento
+  primero, o usá `--force` si sabés lo que hacés.
+
+---
+
 ## 7) Problemas frecuentes
 
 | Síntoma | Solución |

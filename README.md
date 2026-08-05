@@ -72,7 +72,8 @@ VRAM), arena de VRAM grande (`MODE_MAX_QUALITY`) en síntesis y montaje.
 8. [Modos de memoria explicados](#-modos-de-memoria-explicados)
 9. [Estructura del repositorio](#-estructura-del-repositorio)
 10. [Solución de problemas](#-solución-de-problemas)
-11. [Licencias y ética](#-licencias-y-ética)
+11. [Desinstalar](#-desinstalar)
+12. [Licencias y ética](#-licencias-y-ética)
 
 ---
 
@@ -492,6 +493,24 @@ fuser/
 | La cara "tiembla" | Jitter de detección | Activa/sube *Suavizado temporal* |
 | Sin audio en la salida | FFmpeg no disponible / sin audio original | Verifica el estado de FFmpeg en el panel; `imageio-ffmpeg` debería bastar |
 | Muy lento | Estás en CPU | Revisa que el panel muestre **GPU (CUDA)**; instala `onnxruntime-gpu` |
+
+---
+
+## 🗑️ Desinstalar
+
+```bash
+python scripts/uninstall.py --dry-run     # mira qué borraría (no borra nada)
+python scripts/uninstall.py               # desinstala; te pregunta antes
+```
+
+Windows: doble clic en `scripts\uninstall.bat`. Quita el `.venv`, FaceFusion, los modelos, el
+entrenador DeepFaceLab (que vive **fuera** del repo), las cachés, los accesos directos y la imagen
+Docker — desmontando primero el junction a `E:\modelos` para no vaciar ese disco.
+
+**Tus caras, tus videos de salida y tus entrenamientos se conservan**, y los `.dfm` entrenados se
+copian a `../fuser_dfm_backup/` antes de borrar nada. Para llevarse todo:
+`python scripts/uninstall.py --purge-data --remove-repo`. Detalle completo en
+[`INSTALL.md`](INSTALL.md#-desinstalar-fuser).
 
 ---
 

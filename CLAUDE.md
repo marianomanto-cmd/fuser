@@ -74,6 +74,14 @@ python scripts/download_models.py [--all]# pre-descargar modelos
 python scripts/run_demo.py               # PRIMERA PRUEBA: baja stock + prueba features -> carpeta prueba/
 python app.py                            # lanza la UI -> http://127.0.0.1:7860
 python app.py --share                    # enlace público temporal
+
+# Desinstalar (solo stdlib: corre aunque el .venv esté roto)
+python scripts/uninstall.py --dry-run    # plan con tamaños; no borra nada
+python scripts/uninstall.py              # venv+FaceFusion+modelos+DFL+cachés+Docker
+#   Conserva caras/salidas/workspaces y RESCATA los .dfm a ../fuser_dfm_backup/.
+#   --purge-data borra también eso; --remove-repo borra el repo. Desmonta los
+#   junctions ANTES de borrar (si no, se vacía E:) y se niega a correr con un
+#   entrenamiento DFL vivo (--force lo salta).
 ```
 
 ## Verificación rápida de GPU
